@@ -1,0 +1,89 @@
+[
+  {
+    "timestamp": "2026-03-04T18:44:00.764847",
+    "gate_name": "debris",
+    "method": "auto_gmm",
+    "status": "success",
+    "details": {
+      "n_components": 3,
+      "bic": 717864.6966499552,
+      "n_kept": 1242714,
+      "n_total": 1242714,
+      "cluster_sizes": [
+        366323,
+        180583,
+        695808
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-03-04T18:44:01.891404",
+    "gate_name": "singlets",
+    "method": "ransac",
+    "status": "success",
+    "details": {
+      "file": "Mo1 -  T1 LAIP.fcs",
+      "r2": 0.9583178468323235,
+      "slope": 1.2753437324521095,
+      "intercept": 16747.03528417286,
+      "n_singlets": 120510,
+      "n_doublets": 17637
+    }
+  },
+  {
+    "timestamp": "2026-03-04T18:44:01.990136",
+    "gate_name": "singlets",
+    "method": "ransac",
+    "status": "success",
+    "details": {
+      "file": "Mo1 - Fu DX T1 Diag + LAIP.fcs",
+      "r2": 0.9773653118106511,
+      "slope": 1.2892722359017883,
+      "intercept": -75051.23016564036,
+      "n_singlets": 348484,
+      "n_doublets": 27590
+    }
+  },
+  {
+    "timestamp": "2026-03-04T18:44:02.114801",
+    "gate_name": "singlets",
+    "method": "ransac",
+    "status": "success",
+    "details": {
+      "file": "Mo2 - T1 LAIP.fcs",
+      "r2": 0.920544717299662,
+      "slope": 1.4080544301091613,
+      "intercept": 10895.868534849491,
+      "n_singlets": 323211,
+      "n_doublets": 26448
+    }
+  },
+  {
+    "timestamp": "2026-03-04T18:44:02.572579",
+    "gate_name": "singlets",
+    "method": "ransac",
+    "status": "success",
+    "details": {
+      "file": "Mo3 - T1 LAIP.fcs",
+      "r2": 0.9405942305733588,
+      "slope": 1.4003793618301672,
+      "intercept": 19847.651022106875,
+      "n_singlets": 311648,
+      "n_doublets": 25255
+    }
+  },
+  {
+    "timestamp": "2026-03-04T18:44:04.012758",
+    "gate_name": "cd45",
+    "method": "gmm",
+    "status": "success",
+    "details": {
+      "means": [
+        37885.7031531359,
+        173081.5692329498
+      ],
+      "threshold": 59682.99322481697,
+      "n_pos": 266878
+    }
+  }
+]
