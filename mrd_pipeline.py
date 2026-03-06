@@ -165,7 +165,7 @@ DEFAULT_PARAMS: Dict[str, Any] = {
 
     # ── Section 4 : Sélection marqueurs ──────────────────────────────────────
     "exclude_scatter": True,
-    "exclude_markers": ["CD45"],
+    "exclude_markers": [""],
 
     # ── Section 5 : FlowSOM ──────────────────────────────────────────────────
     "xdim": 10,
@@ -594,6 +594,7 @@ class AutoGating:
         file_origin: Optional[np.ndarray] = None,
         per_file: bool = False,
         r2_threshold: float = 0.85,
+        file_id: str = "",
     ) -> np.ndarray:
         """
         Gate singlets adaptatif par régression RANSAC sur FSC-A vs FSC-H.
@@ -649,9 +650,24 @@ class AutoGating:
                         r2_val = r2_score(fa_f[inlier_mask].ravel(),
                                           ransac.predict(fh_f[inlier_mask]))
                         if r2_val < r2_threshold:
+                            # Capture de l'échec RANSAC dans ransac_scatter_data
+                            ransac_scatter_data[str(fname)] = {
+                                "r2": float(r2_val), "method": "ratio_fallback",
+                                "fallback": True, "n_total": int(fmask.sum()),
+                            }
                             singlets_f = _fallback_ratio(fa_f, fh_f)
                             mask[np.where(fmask)[0]] = singlets_f
                             continue
+                    slope_f = float(ransac.estimator_.coef_[0])
+                    intercept_f = float(ransac.estimator_.intercept_)
+                    n_inliers_f = int(inlier_mask.sum()) if inlier_mask is not None else None
+                    # Enregistrement RANSAC par fichier pour audit
+                    ransac_scatter_data[str(fname)] = {
+                        "slope": slope_f, "intercept": intercept_f,
+                        "r2": float(r2_val) if r2_val is not None else None,
+                        "n_inliers": n_inliers_f, "n_total": int(fmask.sum()),
+                        "method": "ransac", "fallback": False,
+                    }
                     residuals = fa_f.ravel() - ransac.predict(fh_f)
                     med, mad = np.median(residuals), np.median(np.abs(residuals - np.median(residuals)))
                     mask[np.where(fmask)[0]] = residuals <= (med + 3.0 * mad)
@@ -675,13 +691,18 @@ class AutoGating:
                         log_gating_event("singlets", "ransac_fallback_ratio", "fallback",
                                          {"r2": float(r2_val)},
                                          f"R² faible (R²={r2_val:.2f} < {r2_threshold})")
+                        # Enregistrement de l'échec RANSAC pour audit
+                        ransac_scatter_data[file_id or "global"] = {
+                            "r2": float(r2_val), "method": "ratio_fallback",
+                            "fallback": True, "n_total": int(valid.sum()),
+                        }
                         mask[valid] = _fallback_ratio(fa_v, fh_v)
                         n_s = int(mask.sum())
                         logging.info(f"[RANSAC fallback ratio] Singlets: {n_s:,}/{valid.sum():,}")
                         gating_reports.append(GateResult(
                             mask=mask, n_kept=n_s, n_total=n_cells,
                             method="ratio_fallback_global", gate_name="G2_singlets",
-                            details={"r2": float(r2_val)},
+                            details={"r2": float(r2_val), "file_id": file_id},
                             warnings=["R² faible → fallback ratio"],
                         ))
                         return mask
@@ -689,9 +710,18 @@ class AutoGating:
                 med, mad = np.median(residuals), np.median(np.abs(residuals - np.median(residuals)))
                 mask[valid] = residuals <= (med + 3.0 * mad)
                 slope = float(ransac.estimator_.coef_[0])
+                intercept = float(ransac.estimator_.intercept_)
                 r2_str = f", R²={r2_val:.3f}" if r2_val is not None else ""
-                logging.info(f"[Auto-RANSAC] y={slope:.3f}x + {ransac.estimator_.intercept_:.0f}{r2_str} | "
+                logging.info(f"[Auto-RANSAC] y={slope:.3f}x + {intercept:.0f}{r2_str} | "
                              f"singlets: {int(mask.sum()):,}/{valid.sum():,}")
+                # Enregistrement RANSAC global pour audit (peuplé ici pour la 1ère fois)
+                ransac_scatter_data[file_id or "global"] = {
+                    "slope": slope, "intercept": intercept,
+                    "r2": float(r2_val) if r2_val is not None else None,
+                    "n_inliers": int(inlier_mask.sum()) if inlier_mask is not None else None,
+                    "n_total": int(valid.sum()),
+                    "method": "ransac", "fallback": False,
+                }
             except Exception as e:
                 logging.warning(f"[AutoGating] RANSAC singlets échoué: {e} → conservation")
                 mask[valid] = True
@@ -700,8 +730,17 @@ class AutoGating:
         gating_reports.append(GateResult(
             mask=mask, n_kept=n_s, n_total=n_cells,
             method="ransac_singlets", gate_name="G2_singlets",
-            details={"per_file": per_file, "r2_threshold": r2_threshold},
+            details={"per_file": per_file, "r2_threshold": r2_threshold, "file_id": file_id},
         ))
+        # Enregistrement singlets pour résumé par fichier
+        if file_id:
+            singlets_summary_per_file.append({
+                "file": file_id,
+                "n_singlets": n_s,
+                "n_total": n_cells,
+                "pct_singlets": round(n_s / max(n_cells, 1) * 100, 2),
+                "ransac_data": ransac_scatter_data.get(file_id),
+            })
         return mask
 
     @staticmethod
@@ -869,11 +908,15 @@ def apply_pregating(
     X: np.ndarray,
     markers: List[str],
     params: Dict[str, Any],
+    file_id: str = "",
+    mode: str = "cd45",
 ) -> np.ndarray:
     """
     Applique le pré-gating et retourne un masque booléen.
 
-    Dispatch selon params["gating_mode"] :
+    Dispatch selon params["gating_mode"] et le paramètre mode :
+        mode="cd45"   → pipeline complet incl. Gate CD45+ (M1/M3)
+        mode="global" → seulement débris + singlets RANSAC, pas de CD45 (M2)
         "auto"   → AutoGating (GMM adaptatif + RANSAC singlets)
         "manual" → _apply_pregating_manual (gating par percentiles)
 
@@ -882,16 +925,23 @@ def apply_pregating(
     if not params.get("apply_pregating", True):
         return np.ones(X.shape[0], dtype=bool)
 
-    mode = params.get("gating_mode", "manual")
-    if mode == "auto":
-        return _apply_pregating_auto(X, markers, params)
-    return _apply_pregating_manual(X, markers, params)
+    # mode="global" → désactive le gating CD45 et CD34 (M2 : toutes cellules mappées)
+    effective_params = dict(params)
+    if mode == "global":
+        effective_params["gate_cd45"] = False
+        effective_params["filter_blasts"] = False
+
+    gating_mode = effective_params.get("gating_mode", "manual")
+    if gating_mode == "auto":
+        return _apply_pregating_auto(X, markers, effective_params, file_id=file_id)
+    return _apply_pregating_manual(X, markers, effective_params, file_id=file_id)
 
 
 def _apply_pregating_manual(
     X: np.ndarray,
     markers: List[str],
     params: Dict[str, Any],
+    file_id: str = "",
 ) -> np.ndarray:
     """
     Gating manuel par percentiles (Gate 1-4).
@@ -899,6 +949,9 @@ def _apply_pregating_manual(
     """
     n = X.shape[0]
     mask = np.ones(n, dtype=bool)
+    _fid = f"[{file_id}] " if file_id else ""
+
+    print(f"  {_fid}Tri cellulaire (mode MANUEL) — {n:,} cellules brutes")
 
     # Gate 1 — Débris (FSC/SSC percentiles)
     if params.get("gate_debris", True):
@@ -910,6 +963,8 @@ def _apply_pregating_manual(
                 v = X[:, ci].astype(float)
                 v = np.where(np.isfinite(v), v, np.nan)
                 mask &= np.isfinite(v) & (v >= np.nanpercentile(v, lo)) & (v <= np.nanpercentile(v, hi))
+        print(f"  {_fid}  G1 Débris   → {mask.sum():>8,}/{n:>8,}  "
+              f"({mask.sum()/n*100:5.1f}%)  [FSC/SSC p{lo:.0f}-p{hi:.0f}]")
 
     # Gate 2 — Doublets (ratio FSC-A/FSC-H)
     if params.get("gate_doublets", True):
@@ -922,6 +977,8 @@ def _apply_pregating_manual(
             ratio[valid] = fa[valid] / fh[valid]
             rmin, rmax = params.get("ratio_min", 0.6), params.get("ratio_max", 1.4)
             mask &= np.isfinite(ratio) & (ratio >= rmin) & (ratio <= rmax)
+        print(f"  {_fid}  G2 Singlets → {mask.sum():>8,}/{n:>8,}  "
+              f"({mask.sum()/n*100:5.1f}%)  [ratio FSC-A/H ∈ [{rmin},{rmax}]]")
 
     # Gate 3 — CD45+ leucocytes
     if params.get("gate_cd45", True):
@@ -931,6 +988,8 @@ def _apply_pregating_manual(
             v = np.where(np.isfinite(v), v, np.nan)
             thr = np.nanpercentile(v, params.get("cd45_pct", 5))
             mask &= np.where(np.isnan(v), False, v > thr)
+        print(f"  {_fid}  G3 CD45+    → {mask.sum():>8,}/{n:>8,}  "
+              f"({mask.sum()/n*100:5.1f}%)  [percentile p{params.get('cd45_pct', 5)}]")
 
     # Gate 4 — Blastes CD34+ (optionnel)
     if params.get("filter_blasts", False):
@@ -948,7 +1007,10 @@ def _apply_pregating_manual(
                     thr_ssc = np.nanpercentile(sv, params.get("ssc_max_pct", 70))
                     mask_cd34 &= np.where(np.isnan(sv), False, sv <= thr_ssc)
             mask &= mask_cd34
+        print(f"  {_fid}  G4 CD34+    → {mask.sum():>8,}/{n:>8,}  "
+              f"({mask.sum()/n*100:5.1f}%)  [CD34 ≥ p{params.get('cd34_pct', 85)}]")
 
+    print(f"  {_fid}  ✓ Total retenu : {mask.sum():,}/{n:,}  ({mask.sum()/n*100:.1f}%)")
     return mask
 
 
@@ -956,6 +1018,7 @@ def _apply_pregating_auto(
     X: np.ndarray,
     markers: List[str],
     params: Dict[str, Any],
+    file_id: str = "",
 ) -> np.ndarray:
     """
     Gating adaptatif GMM/RANSAC via la classe AutoGating.
@@ -963,9 +1026,13 @@ def _apply_pregating_auto(
     """
     if not SKLEARN_AVAILABLE:
         logging.warning("[AutoGating] sklearn non disponible → fallback gating manuel")
-        return _apply_pregating_manual(X, markers, params)
+        return _apply_pregating_manual(X, markers, params, file_id=file_id)
 
-    mask = np.ones(X.shape[0], dtype=bool)
+    n_total = X.shape[0]
+    mask = np.ones(n_total, dtype=bool)
+    _fid = f"[{file_id}] " if file_id else ""
+
+    print(f"  {_fid}Tri cellulaire (mode AUTO) — {n_total:,} cellules brutes")
 
     # Mise à jour des constantes AutoGating depuis les params
     AutoGating.GMM_MAX_SAMPLES = int(params.get("gmm_max_samples", AutoGating.GMM_MAX_SAMPLES))
@@ -975,28 +1042,147 @@ def _apply_pregating_auto(
 
     # Gate 1 — Débris (GMM 2D FSC-A/SSC-A)
     if params.get("gate_debris", True):
+        _idx_before = len(gating_reports)
         mask &= AutoGating.auto_gate_debris(X, markers)
+        for _r in gating_reports[_idx_before:]:
+            _r.details.setdefault("file_id", file_id)
+        print(f"  {_fid}  G1 Débris   → {mask.sum():>8,}/{n_total:>8,}  "
+              f"({mask.sum()/n_total*100:5.1f}%)  [GMM 2D FSC/SSC]")
 
     # Gate 2 — Doublets / Singlets (RANSAC FSC-A vs FSC-H)
     if params.get("gate_doublets", True):
+        _idx_before = len(gating_reports)
         mask &= AutoGating.auto_gate_singlets(
             X, markers,
             per_file=False,
             r2_threshold=float(params.get("ransac_r2_threshold", AutoGating.RANSAC_R2_THRESHOLD)),
+            file_id=file_id,
         )
+        for _r in gating_reports[_idx_before:]:
+            _r.details.setdefault("file_id", file_id)
+        _ransac = ransac_scatter_data.get(file_id or "global", {})
+        _r2_str = f"R²={_ransac['r2']:.3f}" if _ransac.get("r2") is not None else "R²=N/A"
+        _method_str = "RANSAC" if not _ransac.get("fallback") else "ratio (fallback)"
+        print(f"  {_fid}  G2 Singlets → {mask.sum():>8,}/{n_total:>8,}  "
+              f"({mask.sum()/n_total*100:5.1f}%)  [{_method_str}, {_r2_str}]")
 
     # Gate 3 — CD45+ (GMM 1D bimodal)
     if params.get("gate_cd45", True):
+        _idx_before = len(gating_reports)
         mask &= AutoGating.auto_gate_cd45(X, markers)
+        for _r in gating_reports[_idx_before:]:
+            _r.details.setdefault("file_id", file_id)
+        print(f"  {_fid}  G3 CD45+    → {mask.sum():>8,}/{n_total:>8,}  "
+              f"({mask.sum()/n_total*100:5.1f}%)  [GMM 1D bimodal]")
 
     # Gate 4 — Blastes CD34+ (GMM 1D + SSC low optionnel)
     if params.get("filter_blasts", False):
+        _idx_before = len(gating_reports)
         mask &= AutoGating.auto_gate_cd34(
             X, markers,
             use_ssc_filter=bool(params.get("ssc_filter", True)),
         )
+        for _r in gating_reports[_idx_before:]:
+            _r.details.setdefault("file_id", file_id)
+        print(f"  {_fid}  G4 CD34+    → {mask.sum():>8,}/{n_total:>8,}  "
+              f"({mask.sum()/n_total*100:5.1f}%)  [GMM 1D + SSC]")
 
+    print(f"  {_fid}  ✓ Total retenu : {mask.sum():,}/{n_total:,}  ({mask.sum()/n_total*100:.1f}%)")
     return mask
+
+
+
+# =============================================================================
+# SECTION 2c — FONCTIONS D'AUDIT GATING (export + résumé)
+# =============================================================================
+
+def print_gating_summary() -> None:
+    """
+    Affiche un tableau récapitulatif du tri cellulaire par fichier et par gate.
+    À appeler dans le notebook après le lancement de la pipeline :
+        import mrd_pipeline as mp
+        mp.print_gating_summary()
+
+    Utilise les globaux gating_reports et singlets_summary_per_file.
+    """
+    if not gating_reports:
+        print("[Gating] Aucun rapport de gating disponible. Lancez la pipeline d'abord.")
+        return
+
+    # Regroupement par fichier puis par gate
+    from collections import defaultdict
+    by_file: Dict[str, List[GateResult]] = defaultdict(list)
+    no_file: List[GateResult] = []
+    for r in gating_reports:
+        fid = r.details.get("file_id", "")
+        if fid:
+            by_file[fid].append(r)
+        else:
+            no_file.append(r)
+    if no_file:
+        by_file["(global)"] = no_file
+
+    print("\n" + "=" * 72)
+    print("  AUDIT TRI CELLULAIRE — résumé par fichier")
+    print("=" * 72)
+    for fname, reports in sorted(by_file.items()):
+        print(f"\n  Fichier : {fname}")
+        # Trouver le total de cellules brutes (n_total du premier gate)
+        n_raw = reports[0].n_total if reports else "?"
+        print(f"  {'Gate':<20}  {'Retenu':>8}  {'Total':>8}  {'%':>6}  Méthode")
+        print(f"  {'-'*20}  {'-'*8}  {'-'*8}  {'-'*6}  {'-'*20}")
+        for r in reports:
+            pct = f"{r.pct_kept:.1f}%" if r.n_total > 0 else "?"
+            print(f"  {r.gate_name:<20}  {r.n_kept:>8,}  {r.n_total:>8,}  {pct:>6}  {r.method}")
+            if r.warnings:
+                for w in r.warnings:
+                    print(f"    ⚠️  {w}")
+    print("=" * 72 + "\n")
+
+
+def print_ransac_summary() -> None:
+    """
+    Affiche un tableau récapitulatif des résultats RANSAC singlets par fichier.
+    À appeler dans le notebook après le lancement de la pipeline :
+        import mrd_pipeline as mp
+        mp.print_ransac_summary()
+
+    Utilise le global ransac_scatter_data.
+    """
+    if not ransac_scatter_data:
+        print("[RANSAC] Aucune donnée RANSAC disponible. Lancez la pipeline avec gating_mode='auto'.")
+        return
+
+    print("\n" + "=" * 80)
+    print("  AUDIT RANSAC SINGLETS — résumé par fichier")
+    print("=" * 80)
+    print(f"  {'Fichier':<35}  {'Méthode':<16}  {'R²':>6}  {'Pente':>8}  {'Intercept':>10}  "
+          f"{'Inliers':>8}  {'Total':>8}")
+    print(f"  {'-'*35}  {'-'*16}  {'-'*6}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*8}")
+    for fname, d in sorted(ransac_scatter_data.items()):
+        r2_str = f"{d['r2']:.3f}" if d.get("r2") is not None else "N/A"
+        slope_str = f"{d['slope']:.3f}" if d.get("slope") is not None else "N/A"
+        intercept_str = f"{d['intercept']:.0f}" if d.get("intercept") is not None else "N/A"
+        inliers_str = f"{d['n_inliers']:,}" if d.get("n_inliers") is not None else "N/A"
+        total_str = f"{d['n_total']:,}" if d.get("n_total") is not None else "N/A"
+        method_str = d.get("method", "?") + (" ⚠️" if d.get("fallback") else "")
+        print(f"  {fname:<35}  {method_str:<16}  {r2_str:>6}  {slope_str:>8}  "
+              f"{intercept_str:>10}  {inliers_str:>8}  {total_str:>8}")
+    print("=" * 80 + "\n")
+
+
+def reset_gating_logs() -> None:
+    """
+    Remet à zéro tous les logs de gating (utile en cas de ré-exécution du notebook).
+    À appeler avant de relancer la pipeline pour repartir d'un état propre :
+        import mrd_pipeline as mp
+        mp.reset_gating_logs()
+    """
+    global gating_reports, ransac_scatter_data, singlets_summary_per_file
+    gating_reports.clear()
+    ransac_scatter_data.clear()
+    singlets_summary_per_file.clear()
+    print("[Gating] Logs remis à zéro.")
 
 
 def preprocess_fcs(
@@ -1026,7 +1212,7 @@ def preprocess_fcs(
         logging.info(f"   Gating : SKIP (is_nbm_reference={is_nbm_reference})")
     else:
         logging.info(f"   Mode gating : {params.get('gating_mode', 'manual').upper()}")
-        gate_mask = apply_pregating(X_raw, markers, params)
+        gate_mask = apply_pregating(X_raw, markers, params, file_id=str(fcs_path.name))
         X_gated = X_raw[gate_mask]
         logging.info(f"   Gating : {gate_mask.sum():,}/{len(gate_mask):,} cellules retenues")
 
@@ -1051,25 +1237,23 @@ def prepare_patho_adata(
     fcs_path: Path,
     nbm: "NBMReference",
     params: Dict[str, Any],
+    mode: str = "cd45",
 ) -> Any:
     """
-    Charge un FCS patho + auto-gating (débris/doublets/CD45+) + transformation.
-    Retourne un AnnData aligné sur les marqueurs NBM (same order),
-    compatible avec :
-        - ad.concat([nbm._nbm_adata_for_fsom, patho], join='inner') → arbre mixte M1/M3
-        - nbm._fsom_model.new_data(patho)                            → M2
-
-    Identique au preprocessing de FlowSOM_Analysis_Pipeline_MRD_Test.ipynb
-    (Section 6-8) avec gating CD45+ activé pour les données patho.
+    Charge un FCS patho + gating selon le mode + transformation.
+    Retourne un AnnData aligné sur les marqueurs NBM (same order).
 
     Args:
         fcs_path : chemin FCS pathologique
         nbm      : référence NBM construite (pour aligner les marqueurs)
         params   : paramètres de pipeline
+        mode     : "cd45"   → gating complet incl. CD45+ (M1/M3)
+                   "global" → seulement débris + singlets, pas CD45 (M2)
 
     Returns:
         AnnData avec condition='patho', var_names=nbm.markers (zéro-padded)
     """
+    _mode = mode
     import anndata as ad
 
     if not FLOWSOM_AVAILABLE:
@@ -1093,10 +1277,13 @@ def prepare_patho_adata(
         X_raw = np.nan_to_num(X_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
     # ── Gating : débris + doublets + CD45+ (identique à la Section 5 du notebook) ─
-    gate_mask = apply_pregating(X_raw, var_names, params)
+    gate_mask = apply_pregating(
+        X_raw, var_names, params, file_id=str(fcs_path.name), mode=_mode
+    )
     X_gated = X_raw[gate_mask]
     n_gated = int(gate_mask.sum())
-    logging.info(f"[Patho] Gating CD45+ : {n_gated:,}/{len(gate_mask):,} cellules retenues")
+    _mode_label = "CD45+" if _mode == "cd45" else "global (sans CD45)"
+    logging.info(f"[Patho] Gating {_mode_label} : {n_gated:,}/{len(gate_mask):,} cellules retenues")
 
     # ── Transformation cytométrique (même paramètres que build() NBM) ────────
     X_tf = apply_transform(X_gated, params.get("transform", "logicle"), params.get("cofactor", 5.0))
@@ -1408,8 +1595,14 @@ class NBMReference:
 
     def _auto_select_n_clusters(self, X_nbm: np.ndarray) -> int:
         """
-        Optimise le nombre de métaclusters k par stabilité ARI + silhouette.
-        Méthode 2024 : bootstrap ARI + score silhouette pondérés.
+        Pipeline 3 phases d'optimisation du nombre de métaclusters k.
+
+        Méthode littérature 2024 (Weber, Van Gassen et al.) :
+            Phase 1 : Silhouette sur codebook SOM  → screening rapide (1 seul SOM, re-MC par k)
+            Phase 2 : Bootstrap ARI pairwise       → stabilité sur top candidats
+            Phase 3 : Score composite pondéré      → sélection finale
+
+        Stocke self._auto_cluster_report (dict) pour visualisation notebook.
 
         Paramètres lus depuis self.params :
             min_k, max_k, n_bootstrap, sample_boot,
@@ -1420,88 +1613,190 @@ class NBMReference:
             return int(self.params.get("n_clusters", 7))
 
         import anndata as ad
+        import time as _time
+        from sklearn.metrics import adjusted_rand_score, silhouette_score as sk_sil
 
-        min_k = int(self.params.get("min_k", 5))
-        max_k = int(self.params.get("max_k", 35))
-        n_boot = int(self.params.get("n_bootstrap", 10))
-        sample_boot = int(self.params.get("sample_boot", 20000))
+        min_k         = int(self.params.get("min_k", 5))
+        max_k         = int(self.params.get("max_k", 35))
+        n_boot        = int(self.params.get("n_bootstrap", 10))
+        sample_boot   = int(min(self.params.get("sample_boot", 20000), X_nbm.shape[0]))
         min_stability = float(self.params.get("min_stability", 0.75))
-        w_stab = float(self.params.get("w_stability", 0.65))
-        w_sil = float(self.params.get("w_silhouette", 0.35))
-        seed = int(self.params.get("seed", RANDOM_SEED))
-        rng = np.random.default_rng(seed)
+        w_stab        = float(self.params.get("w_stability", 0.65))
+        w_sil         = float(self.params.get("w_silhouette", 0.35))
+        seed          = int(self.params.get("seed", RANDOM_SEED))
+        fallback_k    = int(self.params.get("n_clusters", 7))
 
-        sample_boot = min(sample_boot, X_nbm.shape[0])
-        n_cells = X_nbm.shape[0]
+        n_cells  = X_nbm.shape[0]
+        rlen_val = max(10, min(100, int(np.sqrt(n_cells) * 0.1)))
+        k_range  = list(range(min_k, min(max_k + 1, 50)))
+        fsom_cols = list(range(X_nbm.shape[1]))
 
-        logging.info(f"[Auto-cluster] Test k={min_k}..{max_k}, {n_boot} bootstraps")
+        logging.info(
+            f"[Auto-cluster] 3 phases | k={min_k}..{max_k} | {n_boot} bootstraps | "
+            f"{n_cells:,} cellules | rlen={rlen_val}"
+        )
 
-        k_range = range(min_k, min(max_k + 1, 50))   # cap à 50 pour éviter les timeouts
-        best_k, best_score = int(self.params.get("n_clusters", 7)), -np.inf
+        # ── Phase 1 : Silhouette sur codebook (entraîner SOM une seule fois) ──
+        # Économique : on re-métaclustère le codebook (~n_nodes points) pour chaque k,
+        # au lieu de recalculer le SOM entier. Idéal pour un screening large de k.
+        logging.info("[Auto-cluster] Phase 1 : silhouette codebook (screening rapide)")
+        t0 = _time.time()
 
+        adata_full = ad.AnnData(X=X_nbm.copy())
+        adata_full.var_names = self.markers
+        adata_full.obs["condition"] = "NBM"
+
+        try:
+            fsom_ref = fs.FlowSOM(
+                adata_full, cols_to_use=fsom_cols,
+                xdim=self.xdim, ydim=self.ydim, rlen=rlen_val,
+                n_clusters=max(k_range), seed=seed,
+            )
+        except Exception as e:
+            logging.warning(f"[Auto-cluster] Phase 1 SOM échoué : {e} → k fixe")
+            self._auto_cluster_report = {"best_k": fallback_k, "error": str(e)}
+            return fallback_k
+
+        codebook = np.array(fsom_ref.mudata["cluster_data"].X, dtype=np.float64)
+        if hasattr(codebook, "toarray"):
+            codebook = codebook.toarray()  # type: ignore[union-attr]
+
+        sil_results: List[Dict] = []
         for k in k_range:
-            ari_scores = []
-            sil_scores = []
-            for b in range(n_boot):
-                # Sous-échantillonnage bootstrap
-                idx_boot = rng.choice(n_cells, size=sample_boot, replace=False)
-                X_boot = X_nbm[idx_boot]
+            try:
+                fsom_ref.metacluster(n_clusters=k)
+                node_labels = np.array(
+                    fsom_ref.mudata["cluster_data"].obs["metaclustering"].values, dtype=np.int32
+                )
+                n_unique = len(np.unique(node_labels))
+                sil = sk_sil(codebook, node_labels) if 1 < n_unique < len(codebook) else -1.0
+            except Exception:
+                sil = -1.0
+            sil_results.append({"k": k, "silhouette": sil})
+            logging.debug(f"[Auto-cluster P1] k={k}: sil={sil:.4f}")
 
+        sil_df = pd.DataFrame(sil_results)
+        elapsed_p1 = _time.time() - t0
+        logging.info(f"[Auto-cluster] Phase 1 terminée en {elapsed_p1:.1f}s")
+
+        # ── Sélection top candidats pour Phase 2 ──────────────────────────────
+        n_top = min(8, len(sil_df))
+        top_candidates: List[int] = sil_df.nlargest(n_top, "silhouette")["k"].values.tolist()
+        best_sil_k = int(sil_df.loc[sil_df["silhouette"].idxmax(), "k"])
+        for delta in (-2, -1, 1, 2):
+            nb = best_sil_k + delta
+            if min_k <= nb <= max_k and nb not in top_candidates:
+                top_candidates.append(nb)
+        top_candidates = sorted(set(top_candidates))
+        logging.info(f"[Auto-cluster] Top candidats Phase 2 : {top_candidates}")
+
+        # ── Phase 2 : Bootstrap ARI pairwise (stabilité) ──────────────────────
+        # Sous-échantillon FIXE (mêmes cellules, seeds SOM différentes)
+        # → mesure si le clustering est reproductible indépendamment des seeds.
+        logging.info(f"[Auto-cluster] Phase 2 : stabilité bootstrap ({n_boot} runs × {len(top_candidates)} k)")
+        t0 = _time.time()
+
+        rng = np.random.default_rng(seed)
+        eval_idx = rng.choice(n_cells, size=sample_boot, replace=False)
+        X_eval = X_nbm[eval_idx].copy()
+        adata_eval = ad.AnnData(X=X_eval)
+        adata_eval.var_names = self.markers
+        adata_eval.obs["condition"] = "NBM"
+
+        stability_results: Dict[int, Dict[str, Any]] = {}
+        for k in top_candidates:
+            t_k = _time.time()
+            labels_runs: List[np.ndarray] = []
+            for b in range(n_boot):
                 try:
-                    adata_b = ad.AnnData(X=X_boot)
-                    adata_b.var_names = self.markers
-                    _boot_cols = list(range(adata_b.n_vars))  # entiers → pas de regex get_channels
                     fsom_b = fs.FlowSOM(
-                        adata_b, cols_to_use=_boot_cols,
-                        xdim=self.xdim, ydim=self.ydim,
-                        rlen=max(10, int(np.sqrt(sample_boot) * 0.1)),
-                        n_clusters=k, seed=seed + b,
+                        adata_eval, cols_to_use=fsom_cols,
+                        xdim=self.xdim, ydim=self.ydim, rlen=rlen_val,
+                        n_clusters=k, seed=seed + 100 + b,
                     )
-                    mc_b = np.array(
+                    lbl = np.array(
                         fsom_b.mudata["cell_data"].obs["metaclustering"].values, dtype=np.int32
                     )
-
-                    # Second run sur même sous-ensemble (ARI stabilité)
-                    fsom_b2 = fs.FlowSOM(
-                        adata_b, cols_to_use=_boot_cols,
-                        xdim=self.xdim, ydim=self.ydim,
-                        rlen=max(10, int(np.sqrt(sample_boot) * 0.1)),
-                        n_clusters=k, seed=seed + b + 1000,
-                    )
-                    mc_b2 = np.array(
-                        fsom_b2.mudata["cell_data"].obs["metaclustering"].values, dtype=np.int32
-                    )
-
-                    from sklearn.metrics import adjusted_rand_score
-                    ari = adjusted_rand_score(mc_b, mc_b2)
-                    ari_scores.append(ari)
-
-                    # Score silhouette (sous-échantillonné pour rapidité)
-                    n_sil = min(5000, len(mc_b))
-                    idx_sil = rng.choice(len(mc_b), size=n_sil, replace=False)
-                    if len(np.unique(mc_b[idx_sil])) > 1:
-                        sil = silhouette_score(X_boot[idx_sil], mc_b[idx_sil])
-                        sil_scores.append((sil + 1) / 2)   # normaliser [0, 1]
+                    labels_runs.append(lbl)
                 except Exception as e:
-                    logging.debug(f"[Auto-cluster] k={k} bootstrap {b}: {e}")
-                    continue
+                    logging.debug(f"[Auto-cluster P2] k={k} boot={b}: {e}")
 
-            if not ari_scores:
-                continue
-            mean_ari = float(np.mean(ari_scores))
-            mean_sil = float(np.mean(sil_scores)) if sil_scores else 0.5
+            ari_pairs = [
+                adjusted_rand_score(labels_runs[i], labels_runs[j])
+                for i in range(len(labels_runs))
+                for j in range(i + 1, len(labels_runs))
+            ]
+            mean_ari = float(np.mean(ari_pairs)) if ari_pairs else 0.0
+            std_ari  = float(np.std(ari_pairs))  if ari_pairs else 0.0
+            stability_results[k] = {
+                "mean_ari": mean_ari, "std_ari": std_ari,
+                "n_valid_runs": len(labels_runs), "n_pairs": len(ari_pairs),
+            }
+            elapsed_k = _time.time() - t_k
+            status = "✓" if mean_ari >= min_stability else "✗"
+            logging.info(
+                f"[Auto-cluster P2] k={k}: ARI={mean_ari:.4f}±{std_ari:.4f} {status} ({elapsed_k:.1f}s)"
+            )
 
-            if mean_ari < min_stability:
-                logging.debug(f"[Auto-cluster] k={k}: ARI={mean_ari:.3f} < seuil {min_stability} → rejeté")
-                continue
+        elapsed_p2 = _time.time() - t0
+        logging.info(f"[Auto-cluster] Phase 2 terminée en {elapsed_p2:.1f}s")
 
-            score = w_stab * mean_ari + w_sil * mean_sil
-            logging.debug(f"[Auto-cluster] k={k}: ARI={mean_ari:.3f}, sil={mean_sil:.3f} → score={score:.3f}")
+        # ── Phase 3 : Score composite pondéré ─────────────────────────────────
+        # Score = w_stability × ARI_norm + w_silhouette × Sil_norm
+        # Les k avec ARI < min_stability reçoivent un malus de 30%.
+        composite = sil_df.copy()
+        composite["stability"] = composite["k"].map(
+            lambda k: stability_results.get(k, {}).get("mean_ari", np.nan)      # type: ignore[arg-type]
+        )
+        composite["stability_std"] = composite["k"].map(
+            lambda k: stability_results.get(k, {}).get("std_ari", np.nan)       # type: ignore[arg-type]
+        )
+        valid_comp = composite.dropna(subset=["stability"]).copy()
 
-            if score > best_score:
-                best_score, best_k = score, k
+        if valid_comp.empty:
+            logging.warning("[Auto-cluster] Phase 3 : aucun candidat valide → k fixe")
+            self._auto_cluster_report = {
+                "best_k": fallback_k, "sil_df": sil_df,
+                "stability_results": stability_results, "composite_df": composite,
+            }
+            return fallback_k
 
-        logging.info(f"[Auto-cluster] Meilleur k={best_k} (score={best_score:.3f})")
+        sil_min, sil_max = valid_comp["silhouette"].min(), valid_comp["silhouette"].max()
+        sta_min, sta_max = valid_comp["stability"].min(), valid_comp["stability"].max()
+
+        valid_comp["sil_norm"] = (
+            (valid_comp["silhouette"] - sil_min) / max(sil_max - sil_min, 1e-9)
+        )
+        valid_comp["sta_norm"] = (
+            (valid_comp["stability"] - sta_min) / max(sta_max - sta_min, 1e-9)
+        )
+        valid_comp["composite_score"] = w_stab * valid_comp["sta_norm"] + w_sil * valid_comp["sil_norm"]
+        # Malus si stabilité insuffisante (littérature : robustesse > score absolu)
+        valid_comp.loc[valid_comp["stability"] < min_stability, "composite_score"] *= 0.7
+
+        best_idx = valid_comp["composite_score"].idxmax()
+        best_k   = int(valid_comp.loc[best_idx, "k"])
+
+        logging.info(
+            f"[Auto-cluster] Phase 3 → k={best_k} | "
+            f"sil={valid_comp.loc[best_idx,'silhouette']:.4f} | "
+            f"ARI={valid_comp.loc[best_idx,'stability']:.4f} | "
+            f"score={valid_comp.loc[best_idx,'composite_score']:.4f}"
+        )
+
+        # Stocker le rapport complet pour affichage notebook
+        self._auto_cluster_report: Dict[str, Any] = {
+            "best_k": best_k,
+            "sil_df": sil_df,
+            "stability_results": stability_results,
+            "composite_df": valid_comp,
+            "w_stability": w_stab,
+            "w_silhouette": w_sil,
+            "min_stability": min_stability,
+            "rlen_used": rlen_val,
+            "elapsed_phase1_s": round(elapsed_p1, 1),
+            "elapsed_phase2_s": round(elapsed_p2, 1),
+        }
         return best_k
 
     def build_from_precomputed(
@@ -1775,7 +2070,24 @@ def _mrd_method_1_mixed(
         if fc > fold_change_thr and n_cells_mc >= min_events:
             contributing_mcs.append(mc)
 
-    mrd_value = sum(patho_mc_props.get(mc, 0.0) for mc in contributing_mcs)
+    # MRD M1 (ELN 2022) = somme des DELTAS (excès pathologique) dans les MC contributifs.
+    # delta_mc = prop_patho - prop_nbm  pour chaque MC où prop_patho >= fold_change × prop_nbm.
+    mc_mrd_details: Dict[int, Dict] = {}
+    for mc in contributing_mcs:
+        p_p = patho_mc_props.get(mc, 0.0)
+        p_n = nbm_mc_props.get(mc, 0.0)
+        delta = max(0.0, p_p - p_n)
+        mc_mrd_details[mc] = {
+            "prop_patho": round(p_p, 6),
+            "prop_nbm": round(p_n, 6),
+            "delta": round(delta, 6),
+            "fold_change": round(mc_deltas[mc], 4),
+            "n_cells_patho": patho_mc_counts.get(mc, 0),
+        }
+    # La MRD = somme des deltas (cellules excédentaires / total patho)
+    mrd_value = sum(d["delta"] for d in mc_mrd_details.values())
+    mrd_value = max(0.0, mrd_value)
+    mrd_events = int(round(mrd_value * n_patho))
     delta_max_mc = max(mc_deltas, key=mc_deltas.get) if mc_deltas else None
 
     logging.info(
@@ -1785,8 +2097,11 @@ def _mrd_method_1_mixed(
     return {
         "method": "method_1",
         "mrd_value": float(mrd_value),
-        "mrd_percent": round(float(mrd_value) * 100, 4),
+        "mrd_pct": round(float(mrd_value) * 100, 4),
+        "mrd_percent": round(float(mrd_value) * 100, 4),   # compat
+        "mrd_events": mrd_events,
         "contributing_mcs": contributing_mcs,
+        "mc_mrd_details": mc_mrd_details,
         "mc_patient_props": {k: round(v, 6) for k, v in patho_mc_props.items()},
         "mc_nbm_props": {k: round(v, 6) for k, v in nbm_mc_props.items()},
         "mc_fold_changes": {k: round(v, 4) for k, v in mc_deltas.items()},
@@ -1796,6 +2111,8 @@ def _mrd_method_1_mixed(
         "n_cells_patient": n_patho,
         "n_contributing_cells": int(sum(patho_mc_counts.get(mc, 0) for mc in contributing_mcs)),
         "tree_mode": "mixed_nbm_patho",
+        # is_mrd par métacluster (compatible avec affichage Kaluza)
+        "is_mrd_per_mc": {mc: True for mc in contributing_mcs},
     }
 
 
@@ -1925,14 +2242,18 @@ def _mrd_method_2_new_data(
     return {
         "method": "method_2",
         "mrd_value": float(mrd_value),
-        "mrd_percent": round(float(mrd_value) * 100, 4),
+        "mrd_pct": round(float(mrd_value) * 100, 4),
+        "mrd_percent": round(float(mrd_value) * 100, 4),   # compat
+        "mrd_events": n_mrd_cells,
         "mrd_clusters": mrd_clusters,
         "mrd_cluster_details": mrd_cluster_details,
         "n_mrd_cells": n_mrd_cells,
+        "is_mrd_cell_count": n_mrd_cells,   # alias explicite
         "n_cells_patient": n_patho_cells,
         "mad_allowed": mad_allowed,
         "ratio_threshold": ratio_threshold,
         "threshold_mode": "new_data_mad",
+        "preprocessing_mode": "global",   # toutes les cellules, sans gating CD45
         "cell_distances_stats": {
             "mean": round(float(np.mean(patho_distances)), 6),
             "median": round(float(np.median(patho_distances)), 6),
@@ -2055,18 +2376,26 @@ def _mrd_method_3_mixed(
         f"[M3 mixte] MRD={mrd_value*100:.3f}%  best={best_m}  "
         f"unknown_nodes={len(unknown_nodes)}/{len(occupied_nodes)}"
     )
+    # is_mrd par nœud (True = Unknown = candidat MRD)
+    is_mrd_per_node: Dict[int, bool] = {
+        int(nid): (pop == "Unknown") for nid, pop in node_mapping.items()
+    }
     return {
         "method": "method_3",
         "mrd_value": float(mrd_value),
-        "mrd_percent": round(float(mrd_value) * 100, 4),
+        "mrd_pct": round(float(mrd_value) * 100, 4),
+        "mrd_percent": round(float(mrd_value) * 100, 4),   # compat
+        "mrd_events": n_unknown_cells,
         "best_m3_method": best_m,
         "m3_benchmark": benchmark_scores,
         "unknown_nodes": unknown_nodes,
         "n_unknown_cells": n_unknown_cells,
+        "n_unknown_nodes": len(unknown_nodes),
         "n_cells_patient": int(n_patho),
         "threshold": round(float(threshold), 6),
         "threshold_desc": threshold_desc,
         "node_mapping": node_mapping,
+        "is_mrd_per_node": is_mrd_per_node,
         "pop_distribution": pop_distribution,
         "n_occupied_nodes": int(len(occupied_nodes)),
         "n_populations_ref": int(len(pop_names)),
@@ -2136,14 +2465,32 @@ def mrd_method_1(
         if fc > fold_change_thr and n_cells_mc >= min_events:
             contributing_mcs.append(mc)
 
-    mrd_value = sum(patient_mc_props.get(mc, 0.0) for mc in contributing_mcs)
+    # MRD M1 (ELN 2022) = somme des DELTAS (excès pathologique) dans les MC contributifs.
+    mc_mrd_details_leg: Dict[int, Dict] = {}
+    for mc in contributing_mcs:
+        p_p = patient_mc_props.get(mc, 0.0)
+        p_n = nbm_props.get(mc, 0.0)
+        delta = max(0.0, p_p - p_n)
+        mc_mrd_details_leg[mc] = {
+            "prop_patho": round(p_p, 6),
+            "prop_nbm": round(p_n, 6),
+            "delta": round(delta, 6),
+            "fold_change": round(mc_deltas[mc], 4),
+            "n_cells_patho": patient_mc_counts.get(mc, 0),
+        }
+    mrd_value = sum(d["delta"] for d in mc_mrd_details_leg.values())
+    mrd_value = max(0.0, mrd_value)
+    mrd_events = int(round(mrd_value * n_cells_patient))
     delta_max_mc = max(mc_deltas, key=mc_deltas.get) if mc_deltas else None
 
     return {
         "method": "method_1",
         "mrd_value": float(mrd_value),
+        "mrd_pct": round(float(mrd_value) * 100, 4),
         "mrd_percent": round(float(mrd_value) * 100, 4),
+        "mrd_events": mrd_events,
         "contributing_mcs": contributing_mcs,
+        "mc_mrd_details": mc_mrd_details_leg,
         "mc_patient_props": {k: round(v, 6) for k, v in patient_mc_props.items()},
         "mc_nbm_props": {k: round(v, 6) for k, v in nbm_props.items()},
         "mc_fold_changes": {k: round(v, 4) for k, v in mc_deltas.items()},
@@ -2152,6 +2499,7 @@ def mrd_method_1(
         "fold_change_threshold": fold_change_thr,
         "n_cells_patient": n_cells_patient,
         "n_contributing_cells": int(sum(patient_mc_counts.get(mc, 0) for mc in contributing_mcs)),
+        "is_mrd_per_mc": {mc: True for mc in contributing_mcs},
     }
 
 
@@ -2668,15 +3016,19 @@ def mrd_method_3(
     return {
         "method": "method_3",
         "mrd_value": float(mrd_value),
-        "mrd_percent": round(float(mrd_value) * 100, 4),
+        "mrd_pct": round(float(mrd_value) * 100, 4),
+        "mrd_percent": round(float(mrd_value) * 100, 4),   # compat
+        "mrd_events": n_unknown_cells,
         "best_m3_method": best_method_name,
         "m3_benchmark": benchmark_scores,
         "unknown_nodes": unknown_nodes,
         "n_unknown_cells": n_unknown_cells,
+        "n_unknown_nodes": len(unknown_nodes),
         "n_cells_patient": n_cells_patient,
         "threshold": round(float(threshold), 6),
         "threshold_desc": threshold_desc,
         "node_mapping": node_mapping,
+        "is_mrd_per_node": {int(nid): (pop == "Unknown") for nid, pop in node_mapping.items()},
         "node_best_dist": node_best_dist,
         "pop_distribution": pop_distribution,
         "n_occupied_nodes": int(len(occupied_nodes)),
@@ -2708,82 +3060,141 @@ def select_best_mrd_method(
     m2: Dict[str, Any],
     m3: Dict[str, Any],
     params: Dict[str, Any],
-) -> Tuple[str, float, bool]:
+) -> Tuple[str, float, bool, Dict[str, Any]]:
     """
-    Sélectionne la méthode MRD la plus robuste mathématiquement.
+    Sélectionne la méthode MRD la plus robuste et produit un rapport de décision.
 
     Critères :
-    1. Si les trois méthodes sont concordantes (écart < divergence_threshold),
-       choisir celle avec le meilleur indicateur de confiance.
-    2. Méthode 2 est favorisée si bimodality_coeff > 0.555 (séparation claire
-       signal/bruit — indicateur de distribution bimodale).
-    3. Méthode 1 est favorisée si delta_max_value est très élevé (> 5×).
-    4. Méthode 3 est favorisée par défaut si les précédentes sont incertaines.
+    1. Méthode 1 favorisée si fold-change très clair (> 5×) sur ≥1 MC contributif.
+    2. Méthode 2 favorisée si cell-level MAD disponible + signal cohérent.
+    3. Méthode 3 favorisée par défaut (méthode de mapping populations).
+    4. Bonus de concordance si les méthodes convergent (écart < divergence_threshold).
 
     Returns :
-        best_method  : "method_1" | "method_2" | "method_3"
-        confidence   : score [0,1] — confiance dans la méthode sélectionnée
+        best_method     : "method_1" | "method_2" | "method_3"
+        confidence      : score [0,1] — confiance dans la méthode sélectionnée
         divergence_flag : True si les méthodes divergent au-delà du seuil
+        decision_report : dict détaillant la logique de décision (pour JSON/HTML)
     """
     div_thr = params.get("divergence_threshold_pct", 0.5) / 100.0
+    name_map = {"method_1": "M1", "method_2": "M2", "method_3": "M3"}
 
     v1 = m1.get("mrd_value", 0.0)
     v2 = m2.get("mrd_value", 0.0)
     v3 = m3.get("mrd_value", 0.0)
+    values = {"method_1": v1, "method_2": v2, "method_3": v3}
 
     max_diff = max(abs(v1 - v2), abs(v1 - v3), abs(v2 - v3))
     divergence_flag = bool(max_diff > div_thr)
 
     scores: Dict[str, float] = {"method_1": 0.0, "method_2": 0.0, "method_3": 0.0}
+    reasons: Dict[str, List[str]] = {"method_1": [], "method_2": [], "method_3": []}
 
-    # Méthode 1 : favorisée si fold-change est très clair (> 5×)
+    # ── Méthode 1 : fold-change élevé → signal MRD clair ──────────────────
     delta_max = m1.get("delta_max_value", 0.0)
     n_contributing = len(m1.get("contributing_mcs", []))
     if delta_max > 5.0 and n_contributing >= 1:
         scores["method_1"] += 0.4
-    if n_contributing >= 2:
+        reasons["method_1"].append(
+            f"fold-change max élevé ({delta_max:.1f}×) sur {n_contributing} MC contributif(s)"
+        )
+    elif delta_max > 2.0 and n_contributing >= 1:
         scores["method_1"] += 0.2
+        reasons["method_1"].append(
+            f"fold-change ({delta_max:.1f}×) sur {n_contributing} MC contributif(s)"
+        )
+    if n_contributing >= 2:
+        scores["method_1"] += 0.15
+        reasons["method_1"].append(f"{n_contributing} MC contributifs (signal réparti)")
+    if not reasons["method_1"]:
+        reasons["method_1"].append("aucun MC contributif significatif")
 
-    # Méthode 2 : favorisée si l'approche cell-level MAD est active (plus précise)
-    # ou si bimodality_coeff > 0.555 (mode node-fallback)
-    if m2.get("threshold_mode") == "cell_level_mad":
-        # Cell-level MAD disponible : signal plus fiable → bonus systématique
+    # ── Méthode 2 : cell-level MAD (projection totale sans CD45) ──────────
+    if m2.get("threshold_mode") in ("cell_level_mad", "new_data_mad"):
         n_mrd_clusters = len(m2.get("mrd_clusters", []))
         mrd_frac = m2.get("mrd_value", 0.0)
         if n_mrd_clusters >= 1:
             scores["method_2"] += 0.35
-        if 0.001 < mrd_frac < 0.5:    # signal cohérent : pas négligeable, pas aberrant
+            reasons["method_2"].append(
+                f"MAD cell-level actif — {n_mrd_clusters} cluster(s) MRD détectés"
+            )
+        if 0.001 < mrd_frac < 0.5:
             scores["method_2"] += 0.15
+            reasons["method_2"].append(
+                f"signal MRD cohérent ({mrd_frac*100:.3f}% — hors aberration)"
+            )
+        reasons["method_2"].append("mode global (toutes cellules, sans gating CD45)")
     else:
-        # Mode fallback nœud-niveau (rétro-compat)
         bc = m2.get("bimodality_coeff", 0.0)
         if bc > 0.555:
             scores["method_2"] += 0.5 + min(bc - 0.555, 0.3)
+            reasons["method_2"].append(f"distribution bimodale claire (BC={bc:.3f} > 0.555)")
         n_deviant = len(m2.get("deviant_nodes", m2.get("mrd_clusters", [])))
         if n_deviant >= 3:
             scores["method_2"] += 0.1
+            reasons["method_2"].append(f"{n_deviant} nœuds déviants")
+    if not reasons["method_2"]:
+        reasons["method_2"].append("signal M2 faible ou absent")
 
-    # Méthode 3 : bonus si plusieurs nœuds Unknown bien répartis
+    # ── Méthode 3 : fraction de nœuds Unknown (mapping populations) ────────
     n_unknown = len(m3.get("unknown_nodes", []))
     n_occupied = m3.get("n_occupied_nodes", 1)
     unknown_frac = n_unknown / max(n_occupied, 1)
-    if 0.05 < unknown_frac < 0.5:   # entre 5% et 50% de nœuds Unknown = signal cohérent
+    if 0.05 < unknown_frac < 0.5:
         scores["method_3"] += 0.35
-    scores["method_3"] += 0.1      # léger bonus de base (méthode principale du notebook)
+        reasons["method_3"].append(
+            f"{n_unknown} nœuds Unknown / {n_occupied} occupés ({unknown_frac*100:.1f}%)"
+        )
+    scores["method_3"] += 0.1   # bonus de base (méthode de référence mapping)
+    reasons["method_3"].append(
+        f"méthode mapping populations (best: {m3.get('best_m3_method', 'N/A')})"
+    )
 
-    # Si pas de divergence, bonus de concordance pour les méthodes proches de la médiane
+    # ── Bonus de concordance si les méthodes convergent ─────────────────────
+    concordance_bonus_applied = False
     if not divergence_flag:
         median_mrd = float(np.median([v1, v2, v3]))
-        for m, v in [("method_1", v1), ("method_2", v2), ("method_3", v3)]:
+        for meth, v in [("method_1", v1), ("method_2", v2), ("method_3", v3)]:
             closeness = max(0.0, 1.0 - abs(v - median_mrd) / max(median_mrd, 1e-6))
-            scores[m] += closeness * 0.15
+            if closeness > 0.5:
+                scores[meth] += closeness * 0.15
+                concordance_bonus_applied = True
 
-    best_method = max(scores, key=scores.get)
+    best_method = max(scores, key=scores.get)  # type: ignore[arg-type]
     total_score = sum(scores.values())
     confidence = scores[best_method] / max(total_score, 1e-6)
     confidence = min(1.0, confidence)
 
-    return best_method, round(confidence, 3), divergence_flag
+    # ── Rapport de décision (visible dans JSON + HTML) ─────────────────────
+    decision_report: Dict[str, Any] = {
+        "best_method": best_method,
+        "best_method_label": name_map[best_method],
+        "confidence": round(confidence, 3),
+        "divergence_flag": divergence_flag,
+        "divergence_detail": (
+            f"Écart max entre méthodes : {max_diff*100:.3f}% "
+            f"(seuil : {div_thr*100:.2f}%)"
+        ),
+        "mrd_by_method": {
+            name_map[m]: round(v * 100, 4) for m, v in values.items()
+        },
+        "scores": {name_map[m]: round(s, 4) for m, s in scores.items()},
+        "reasons": {name_map[m]: r for m, r in reasons.items()},
+        "concordance_bonus": concordance_bonus_applied,
+        "selection_summary": (
+            f"Méthode retenue : {name_map[best_method]} "
+            f"(confiance {confidence*100:.0f}%)"
+            + (" ⚠️ DIVERGENCE" if divergence_flag else " ✓ concordant")
+        ),
+    }
+
+    logging.info(
+        f"[Sélection MRD] {decision_report['selection_summary']} | "
+        f"M1={v1*100:.3f}% M2={v2*100:.3f}% M3={v3*100:.3f}% | "
+        f"divergence={divergence_flag}"
+    )
+
+    return best_method, round(confidence, 3), divergence_flag, decision_report
 
 
 # =============================================================================
@@ -2839,6 +3250,7 @@ def run_mrd_pipeline_for_patient(
             "best_method": None,
             "confidence": 0.0,
             "divergence_flag": False,
+            "decision_report": {},
         },
         "errors": [],
     }
@@ -2868,31 +3280,44 @@ def run_mrd_pipeline_for_patient(
             if verbose:
                 print(f"[Pipeline] {pid} | arbre mixte (M1/M3) + new_data (M2)")
 
-            # ── Étape 1 : AnnData patho (gate CD45+ + transform) ─────────────
+            # ── Étape 1a : AnnData patho avec gating CD45+ (M1 / M3) ───────────
             try:
-                adata_patho = prepare_patho_adata(fcs_path, nbm, p)
+                adata_patho_cd45 = prepare_patho_adata(fcs_path, nbm, p, mode="cd45")
             except Exception as e:
-                raise RuntimeError(f"prepare_patho_adata échoué: {e}") from e
+                raise RuntimeError(f"prepare_patho_adata [cd45] échoué: {e}") from e
+
+            # ── Étape 1b : AnnData patho SANS CD45 (M2 — toutes cellules) ────────
+            # ELN 2022 M2 : la projection new_data doit couvrir toutes les cellules
+            # (GMM débris + RANSAC seulement — pas de gate CD45)
+            try:
+                adata_patho_global = prepare_patho_adata(fcs_path, nbm, p, mode="global")
+            except Exception as e:
+                logging.warning(f"[prepare_patho_adata global] {pid}: {e}")
+                adata_patho_global = adata_patho_cd45   # fallback sécurisé
 
             result["preprocessing"] = {
-                "n_cells": adata_patho.n_obs,
-                "n_markers": adata_patho.n_vars,
-                "markers": list(adata_patho.var_names),
-                "n_common_markers": len([m for m in nbm.markers if m in list(adata_patho.var_names)]),
-                "common_markers": [m for m in nbm.markers if m in list(adata_patho.var_names)],
-                "n_cells_mapped": adata_patho.n_obs,
+                "n_cells_cd45": adata_patho_cd45.n_obs,
+                "n_cells_global": adata_patho_global.n_obs,
+                "n_cells": adata_patho_cd45.n_obs,
+                "n_markers": adata_patho_cd45.n_vars,
+                "markers": list(adata_patho_cd45.var_names),
+                "n_common_markers": len([m for m in nbm.markers if m in list(adata_patho_cd45.var_names)]),
+                "common_markers": [m for m in nbm.markers if m in list(adata_patho_cd45.var_names)],
+                "n_cells_mapped": adata_patho_cd45.n_obs,
+                "preprocessing_m1m3": "cd45_gating",
+                "preprocessing_m2": "global_no_cd45",
             }
 
-            if adata_patho.n_obs < 100:
+            if adata_patho_cd45.n_obs < 100:
                 result["errors"].append(
-                    f"Trop peu de cellules après gating ({adata_patho.n_obs}) — résultats peu fiables."
+                    f"Trop peu de cellules après gating CD45 ({adata_patho_cd45.n_obs}) — résultats peu fiables."
                 )
 
             # ── Étape 2 : M1 + M3 via arbre mixte NBM+patho ──────────────────
             if verbose:
-                print(f"  → Arbre mixte NBM+patho (M1/M3)...")
+                print(f"  → Arbre mixte NBM+patho (M1/M3) [mode cd45]...")
             try:
-                mixed_result = nbm.build_mixed_tree(adata_patho, p)
+                mixed_result = nbm.build_mixed_tree(adata_patho_cd45, p)
 
                 try:
                     result["mrd"]["method_1"] = _mrd_method_1_mixed(mixed_result, p)
@@ -2913,11 +3338,11 @@ def run_mrd_pipeline_for_patient(
                 logging.error(f"[M1/M3 mixte] {pid}: {e}")
                 mixed_result = None
 
-            # ── Étape 3 : M2 via FlowSOM.new_data() ──────────────────────────
+            # ── Étape 3 : M2 via FlowSOM.new_data() — sans gating CD45 ─────────
             if verbose:
-                print(f"  → Projection patho sur arbre NBM (M2)...")
+                print(f"  → Projection patho sur arbre NBM (M2) [mode global — sans CD45]...")
             try:
-                result["mrd"]["method_2"] = _mrd_method_2_new_data(nbm, adata_patho, p)
+                result["mrd"]["method_2"] = _mrd_method_2_new_data(nbm, adata_patho_global, p)
             except Exception as e:
                 result["mrd"]["method_2"] = {"method": "method_2", "error": str(e), "mrd_value": 0.0}
                 result["errors"].append(f"M2 new_data : {e}")
@@ -3048,10 +3473,11 @@ def run_mrd_pipeline_for_patient(
     m1 = result["mrd"]["method_1"]
     m2 = result["mrd"]["method_2"]
     m3 = result["mrd"]["method_3"]
-    best, conf, div_flag = select_best_mrd_method(m1, m2, m3, p)
+    best, conf, div_flag, decision_report = select_best_mrd_method(m1, m2, m3, p)
     result["mrd"]["best_method"] = best
     result["mrd"]["confidence"] = conf
     result["mrd"]["divergence_flag"] = div_flag
+    result["mrd"]["decision_report"] = decision_report
     best_mrd = result["mrd"][best].get("mrd_value", 0.0)
     result["mrd"]["best_mrd_value"] = float(best_mrd)
     result["mrd"]["best_mrd_percent"] = round(float(best_mrd) * 100, 4)
