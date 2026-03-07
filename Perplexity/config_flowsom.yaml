@@ -114,8 +114,28 @@ downsampling:
 # ----------------------------------------------------------------------------
 visualization:
   save_plots: true
-  plot_format: "png"    # png | pdf | svg
+  umap_enabled: true        # true = calculer UMAP après clustering (GPU si dispo)
+  plot_format: "png"        # png | pdf | svg
   dpi: 300
+
+  # Paramètres par figure exportée
+  figures:
+    heatmap:
+      figsize: [16, 8]       # Taille de la heatmap MFI (largeur × hauteur en pouces)
+      cmap: "magma"          # Colormap matplotlib (magma, viridis, RdBu_r, etc.)
+    metacluster_dist:
+      figsize: [14, 6]       # Taille du barplot de distribution des métaclusters
+    umap:
+      n_sample: 100000       # Cellules max pour l'UMAP (sous-échantillonnage si dépassé)
+      point_size: 3          # Taille des points
+      alpha: 0.5             # Transparence des points
+    gating:
+      n_sample: 60000        # Cellules max affichées par graphique de gating
+    sankey:
+      height: 450            # Hauteur du Sankey HTML (pixels)
+      paper_bgcolor: "#fafafa"
+    html_report:
+      self_contained: true   # true = embedder plotly.js (~3.5 MB) — fonctionne hors-ligne
 
 # ----------------------------------------------------------------------------
 # GPU — Accélération CUDA via FlowSomGpu (module local)

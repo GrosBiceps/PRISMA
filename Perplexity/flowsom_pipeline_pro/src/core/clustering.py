@@ -130,6 +130,9 @@ class FlowSOMClusterer:
         self.metacluster_map_: Optional[np.ndarray] = None  # node→metacluster
         self.metacluster_assignments_: Optional[np.ndarray] = None  # cell→metacluster
         self.used_gpu_: bool = False
+        self._mst_layout_: Optional[np.ndarray] = (
+            None  # (n_nodes, 2) — coordonnées MST Kamada-Kawai
+        )
 
     # ------------------------------------------------------------------
     # Fit
@@ -235,6 +238,16 @@ class FlowSOMClusterer:
         except Exception as e:
             warnings.warn(f"Extraction assignations GPU échouée: {e}")
 
+        # Calcul du layout MST sur le codebook GPU (identique à fs.FlowSOM.build_MST)
+        try:
+            codebook = np.asarray(self._fsom_model.codes, dtype=float)
+            self._mst_layout_ = self._compute_mst_layout(codebook)
+            print(
+                f"   [OK] Layout MST calculé sur codebook GPU ({codebook.shape[0]} nodes)"
+            )
+        except Exception as e:
+            warnings.warn(f"Calcul layout MST GPU échoué: {e}")
+
     def _extract_assignments_cpu(self, X: np.ndarray) -> None:
         """Extrait les assignations depuis le modèle CPU (flowsom)."""
         try:
@@ -260,6 +273,40 @@ class FlowSOMClusterer:
 
         except Exception as e:
             warnings.warn(f"Extraction assignations CPU échouée: {e}")
+
+    def _compute_mst_layout(self, codebook: np.ndarray) -> np.ndarray:
+        """
+        Calcule le layout MST Kamada-Kawai sur le codebook SOM.
+
+        Reproduit exactement fs.FlowSOM.build_MST() (saeyslab/flowsom):
+          1. Distance euclidienne entre tous les nodes (cdist)
+          2. Graphe complet pondéré (igraph Weighted_Adjacency)
+          3. Arbre couvrant minimum (spanning_tree)
+          4. Layout Kamada-Kawai (seed=grille, maxiter=50×N)
+
+        Args:
+            codebook: Matrice (n_nodes, n_markers) — centroïdes SOM.
+
+        Returns:
+            Array float (n_nodes, 2) — coordonnées x/y du layout MST.
+        """
+        from scipy.spatial.distance import cdist
+        import igraph as ig
+
+        adjacency = cdist(codebook, codebook, metric="euclidean")
+        full_graph = ig.Graph.Weighted_Adjacency(
+            adjacency, mode="undirected", loops=False
+        )
+        mst_graph = ig.Graph.spanning_tree(full_graph, weights=full_graph.es["weight"])
+        mst_graph.es["weight"] = [
+            w / np.mean(mst_graph.es["weight"]) for w in mst_graph.es["weight"]
+        ]
+        layout = mst_graph.layout_kamada_kawai(
+            seed=mst_graph.layout_grid(),
+            maxiter=50 * mst_graph.vcount(),
+            kkconst=max(mst_graph.vcount(), 1),
+        ).coords
+        return np.array(layout, dtype=float)
 
     def _recompute_metaclusters(self) -> None:
         """Recalcule les métaclusters par clustering hiérarchique sur le codebook SOM."""
@@ -339,6 +386,88 @@ class FlowSOMClusterer:
             f"FlowSOMClusterer({backend}, grid={self.xdim}×{self.ydim}, "
             f"k={self.n_metaclusters}, cells={n_cells:,})"
         )
+
+    def get_grid_coords(self) -> np.ndarray:
+        """
+        Retourne les coordonnées de grille SOM (n_nodes, 2) pour chaque node.
+
+        Pour le modèle CPU (fs.FlowSOM), utilise get_cluster_data().obsm["grid"]
+        si disponible. Pour le GPU (ou en fallback), calcule le mapping
+        grille régulière row-major: node i → (col=i % xdim, row=i // xdim).
+
+        Returns:
+            Array float (n_nodes, 2) — colonnes [x, y].
+        """
+        # CPU fs.FlowSOM — obsm["grid"] disponible
+        if not self.used_gpu_ and self._fsom_model is not None:
+            try:
+                cluster_data = self._fsom_model.get_cluster_data()
+                grid = cluster_data.obsm.get("grid", None)
+                if grid is not None:
+                    return np.asarray(grid, dtype=float)
+            except Exception:
+                pass
+
+        # Fallback : grille régulière row-major (identique au comportement R FlowSOM)
+        n_nodes = self.xdim * self.ydim
+        coords = np.array(
+            [(i % self.xdim + 1, i // self.xdim + 1) for i in range(n_nodes)],
+            dtype=float,
+        )
+        return coords
+
+    def get_layout_coords(self) -> np.ndarray:
+        """
+        Retourne les coordonnées MST Kamada-Kawai (n_nodes, 2) pour chaque node.
+
+        Priorité:
+          1. _mst_layout_ préalablement calculé (GPU ou CPU)
+          2. obsm["layout"] du modèle CPU fs.FlowSOM
+          3. Calcul à la demande depuis le codebook GPU
+          4. Fallback grille régulière
+
+        Returns:
+            Array float (n_nodes, 2) — colonnes [x, y].
+        """
+        # Layout déjà calculé (GPU via _extract_assignments_gpu)
+        if self._mst_layout_ is not None:
+            return self._mst_layout_
+
+        # CPU fs.FlowSOM — obsm["layout"] natif
+        if not self.used_gpu_ and self._fsom_model is not None:
+            try:
+                cluster_data = self._fsom_model.get_cluster_data()
+                layout = cluster_data.obsm.get("layout", None)
+                if layout is not None:
+                    self._mst_layout_ = np.asarray(layout, dtype=float)
+                    return self._mst_layout_
+            except Exception:
+                pass
+
+        # Calcul à la demande depuis le codebook (GPU sans _mst_layout_ pré-calculé)
+        if self._fsom_model is not None and hasattr(self._fsom_model, "codes"):
+            try:
+                codebook = np.asarray(self._fsom_model.codes, dtype=float)
+                self._mst_layout_ = self._compute_mst_layout(codebook)
+                return self._mst_layout_
+            except Exception as e:
+                warnings.warn(f"Calcul layout MST à la demande échoué: {e}")
+
+        # Fallback ultime : grille régulière
+        return self.get_grid_coords()
+
+    def get_node_sizes(self) -> np.ndarray:
+        """
+        Retourne le nombre de cellules par node SOM (n_nodes,).
+
+        Returns:
+            Array int (n_nodes,).
+        """
+        if self.node_assignments_ is None:
+            return np.zeros(self.n_nodes, dtype=int)
+        return np.bincount(
+            self.node_assignments_.astype(int), minlength=self.n_nodes
+        ).astype(float)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

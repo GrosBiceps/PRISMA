@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List
 
 import numpy as np
@@ -98,3 +99,36 @@ class GateResult:
             f"GateResult({self.gate_name!r}, method={self.method!r}, "
             f"kept={self.n_kept}/{self.n_total} ({self.pct_kept:.1f}%))"
         )
+
+
+# Liste globale pour collecter les rapports de gating
+gating_reports: List[GateResult] = []
+
+# =============================================================================
+# LOGGING STRUCTURÉ — gating_log.json
+# =============================================================================
+gating_log_entries: List[Dict[str, Any]] = []
+
+
+def log_gating_event(
+    gate_name: str,
+    method: str,
+    status: str,
+    details: Dict[str, Any] = None,
+    warning_msg: str = None,
+):
+    """Log structuré d'un événement de gating (JSON exportable)."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "gate_name": gate_name,
+        "method": method,
+        "status": status,  # "success", "fallback", "warning", "error"
+        "details": details or {},
+    }
+    if warning_msg:
+        entry["warning"] = warning_msg
+        print(f"   [WARNING] {gate_name}: {warning_msg}")
+    gating_log_entries.append(entry)
+
+
+print("\n[OK] GateResult dataclass + logging structuré chargés")

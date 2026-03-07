@@ -3,9 +3,9 @@
 # Voir config/constants.py pour les seuils cliniques ELN — NE PAS MODIFIER ICI.
 
 paths:
-  healthy_folder: "Data/Moelle normale"
-  patho_folder: "Data/Patho"
-  output_dir: "Results"
+  healthy_folder: "C:\\Users\\Florian Travail\\Documents\\FlowSom\\Data\\Moelle normale"
+  patho_folder: "C:\\Users\\Florian Travail\\Documents\\FlowSom\\Data\\Patho"
+  output_dir: "C:\\Users\\Florian Travail\\Documents\\FlowSom\\Perplexity\\Results"
 
 analysis:
   compare_mode: true
@@ -16,7 +16,7 @@ pregate:
   mode_blastes_vs_normal: true
   viable: true
   singlets: true
-  cd45: false
+  cd45: true
   cd34: false
 
 pregate_advanced:
@@ -30,8 +30,8 @@ pregate_advanced:
   cd34_ssc_max_percentile: 60.0
 
 flowsom:
-  xdim: 10
-  ydim: 10
+  xdim: 25
+  ydim: 25
   rlen: "auto"
   n_metaclusters: 8
   learning_rate: 0.05
@@ -69,11 +69,54 @@ downsampling:
 
 visualization:
   save_plots: true
-  plot_format: "png"
+  umap_enabled: true        # true = calculer UMAP après clustering
+  plot_format: "png"        # png | pdf | svg
   dpi: 300
+
+  # Paramètres par figure exportée
+  figures:
+    heatmap:
+      figsize: [16, 8]
+      cmap: "magma"
+    metacluster_dist:
+      figsize: [14, 6]
+    umap:
+      n_sample: 100000
+      point_size: 3
+      alpha: 0.5
+    gating:
+      n_sample: 60000
+    sankey:
+      height: 450
+      paper_bgcolor: "#fafafa"
+    html_report:
+      self_contained: true
 
 gpu:
   enabled: true
 
 logging:
   level: "INFO"
+
+population_mapping:
+  enabled: true
+  ref_mfi_dir: "C:\\Users\\Florian Travail\\Documents\\FlowSom\\Data\\Ref MFI"
+  cache_dir: "output/ref_mfi_parquet_cache"
+  distance_percentile: 60
+  include_scatter: true
+  normalization_method: "range"
+  mapping_method: "cosine_prior"   # M12 recommandé ELN 2022
+  unknown_threshold_mode: "auto_otsu"
+  hard_limit_factor: 5.0
+  prior_mode: "log10_cubed"
+  transform_method: "arcsinh"
+  arcsinh_cofactor: 5.0
+  apply_to_scatter: false
+  knn_sample_size: 2000
+  knn_k: 15
+  cov_reg_alpha: 0.0001
+  total_knn_points: 15000
+  blast_enabled: true
+  blast_suspect_categories: ["BLAST_HIGH", "BLAST_MODERATE"]
+  viz_interactive: true
+  viz_max_points: 50000

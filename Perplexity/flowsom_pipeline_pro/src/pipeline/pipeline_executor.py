@@ -29,13 +29,16 @@ from flowsom_pipeline_pro.src.models.pipeline_result import (
     ClusteringMetrics,
 )
 from flowsom_pipeline_pro.src.io.fcs_reader import get_fcs_files, load_as_flow_samples
+from flowsom_pipeline_pro.src.core.clustering import FlowSOMClusterer
 from flowsom_pipeline_pro.src.services.preprocessing_service import (
     preprocess_all_samples,
+    preprocess_combined,
 )
 from flowsom_pipeline_pro.src.services.clustering_service import (
     run_clustering,
     build_cells_dataframe,
     stack_samples,
+    stack_raw_markers,
 )
 from flowsom_pipeline_pro.src.services.export_service import ExportService
 from flowsom_pipeline_pro.src.utils.logger import GatingLogger, get_logger
@@ -93,10 +96,22 @@ class FlowSOMPipeline:
 
             _logger.info("  %d échantillon(s) chargé(s)", len(samples))
 
-            # ── Étape 2: Prétraitement ────────────────────────────────────────
-            _logger.info("Étape 2: Prétraitement (gating + transformation)...")
-            processed_samples = preprocess_all_samples(
-                samples, config, gating_logger=self._gating_logger
+            # Définir output_dir tôt (utilisé pour les plots de gating)
+            output_dir = Path(config.paths.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # ── Étape 2: Prétraitement ───────────────────────────────────────────
+            _logger.info("Étape 2: Prétraitement (gating combiné + transformation)...")
+            # Utilise l'approche combinée (fidèle à flowsom_pipeline.py) :
+            # gating sur les données brutes concaténées, sous-échantillonnage APRÈS.
+            viz_cfg = getattr(config, "visualization", None)
+            viz_save = getattr(viz_cfg, "save_plots", True)
+            umap_enabled = getattr(viz_cfg, "umap_enabled", True)
+            processed_samples, gating_figures = preprocess_combined(
+                samples,
+                config,
+                gating_logger=self._gating_logger,
+                gating_plot_dir=output_dir / "plots" if viz_save else None,
             )
 
             if not processed_samples:
@@ -142,6 +157,20 @@ class FlowSOMPipeline:
                 X_stacked, selected_markers, obs, metaclustering, clustering
             )
 
+            # ── Étape 4b: Construction du DataFrame FCS complet ───────────────
+            # Identique au monolithe flowsom_pipeline.py :
+            # - Toutes les colonnes (données brutes pré-transformation)
+            # - FlowSOM_metacluster, FlowSOM_cluster (+1 pour Kaluza ≥ 1)
+            # - xGrid, yGrid, xNodes, yNodes avec jitter circulaire (style R)
+            # - size (nb cellules par node), Condition_Num
+            _logger.info("  Construction du DataFrame FCS complet (style Kaluza)...")
+            df_fcs = self._build_fcs_dataframe(
+                processed_samples,
+                metaclustering,
+                clustering,
+                clusterer,
+            )
+
             # Matrice MFI — convertie en DataFrame (marqueurs × metaclusters)
             mfi_raw = clusterer.get_mfi_matrix(X_stacked, selected_markers)
             unique_mc = np.unique(metaclustering)
@@ -153,15 +182,112 @@ class FlowSOMPipeline:
 
             # ── Étape 5: Metrics de clustering ────────────────────────────────
             metrics = self._compute_metrics(X_stacked, metaclustering)
+            # ── Accumulation des figures pour le rapport HTML ─────────────────
+            # Clés calquées sur les noms du notebook de référence
+            _mpl_figures: Dict[str, object] = dict(
+                gating_figures
+            )  # fig_overview, fig_gate_*
+            _plotly_figures: Dict[str, object] = {}
 
-            # ── Étape 6: Exports ──────────────────────────────────────────────
+            # ── Étape 5b: UMAP (si save_plots ET umap_enabled) ───────────────────
+            if viz_save and umap_enabled:
+                try:
+                    from umap import UMAP
+                    from flowsom_pipeline_pro.src.visualization.flowsom_plots import (
+                        plot_umap,
+                    )
+
+                    _logger.info("Calcul UMAP...")
+                    fig_cfg = getattr(viz_cfg, "figures", {}) or {}
+                    umap_cfg = fig_cfg.get("umap", {})
+                    umap_sample_size = min(
+                        umap_cfg.get("n_sample", 100_000), X_stacked.shape[0]
+                    )
+                    rng_umap = np.random.default_rng(config.flowsom.seed)
+                    idx_umap = rng_umap.choice(
+                        X_stacked.shape[0], umap_sample_size, replace=False
+                    )
+                    umap_coords = UMAP(
+                        n_components=2, random_state=config.flowsom.seed, n_jobs=1
+                    ).fit_transform(X_stacked[idx_umap])
+                    fig_umap = plot_umap(
+                        umap_coords,
+                        metaclustering[idx_umap],
+                        output_dir / "plots" / f"umap_{timestamp}.png",
+                        n_metaclusters=int(metaclustering.max()) + 1,
+                        seed=config.flowsom.seed,
+                    )
+                    if fig_umap is not None:
+                        _mpl_figures["fig_umap"] = fig_umap
+                    _logger.info("UMAP sauvegardé.")
+                except Exception as _e:
+                    _logger.warning("UMAP échoué (non bloquant): %s", _e)
+
+            # ── MST statique matplotlib ───────────────────────────────────────
+            if viz_save:
+                try:
+                    from flowsom_pipeline_pro.src.visualization.flowsom_plots import (
+                        plot_mst_static,
+                    )
+
+                    fig_mst_s = plot_mst_static(
+                        clusterer,
+                        mfi_matrix,
+                        metaclustering,
+                        output_dir / "plots" / f"mst_static_{timestamp}.png",
+                    )
+                    if fig_mst_s is not None:
+                        _mpl_figures["fig_mst_static"] = fig_mst_s
+                    _logger.info("MST statique sauvegardé.")
+                except Exception as _e:
+                    _logger.warning("MST statique échoué (non bloquant): %s", _e)
+
+            # ── MST Plotly interactif ─────────────────────────────────────────
+            if viz_save:
+                try:
+                    from flowsom_pipeline_pro.src.visualization.flowsom_plots import (
+                        plot_mst_plotly,
+                    )
+
+                    fig_mst_p = plot_mst_plotly(
+                        clusterer,
+                        mfi_matrix,
+                        metaclustering,
+                        output_dir / "plots" / f"mst_interactive_{timestamp}.html",
+                    )
+                    if fig_mst_p is not None:
+                        _plotly_figures["fig_mst"] = fig_mst_p
+                    _logger.info("MST Plotly sauvegardé.")
+                except Exception as _e:
+                    _logger.warning("MST Plotly échoué (non bloquant): %s", _e)
+
+            # ── Grille SOM Plotly ScatterGL ───────────────────────────────────
+            if viz_save:
+                try:
+                    from flowsom_pipeline_pro.src.visualization.flowsom_plots import (
+                        plot_som_grid_plotly,
+                    )
+
+                    fig_grid_p = plot_som_grid_plotly(
+                        clustering,
+                        metaclustering,
+                        clusterer,
+                        output_dir / "plots" / f"som_grid_{timestamp}.html",
+                        seed=config.flowsom.seed,
+                    )
+                    if fig_grid_p is not None:
+                        _plotly_figures["fig_grid_mc"] = fig_grid_p
+                    _logger.info("SOM Grid Plotly sauvegardé.")
+                except Exception as _e:
+                    _logger.warning("SOM Grid Plotly échoué (non bloquant): %s", _e)
+            # ── Étape 6: Exports ───────────────────────────────────────────────────
             _logger.info("Étape 6: Exports...")
-            output_dir = Path(config.paths.output_dir)
             exporter = ExportService(config, output_dir, timestamp=timestamp)
 
             input_files = [str(s.path) for s in samples]
             export_paths = exporter.export_all(
                 df_cells=df_cells,
+                df_fcs=df_fcs,
                 mfi_matrix=mfi_matrix,
                 metaclustering=metaclustering,
                 selected_markers=selected_markers,
@@ -170,19 +296,215 @@ class FlowSOMPipeline:
             )
 
             # Plots (si activés dans la config)
-            viz_config = getattr(config, "visualization", None)
-            if viz_config is not None and getattr(viz_config, "enabled", True):
+            if viz_cfg is not None and viz_save:
                 condition_labels = (
                     df_cells["condition"].values
                     if "condition" in df_cells.columns
                     else None
                 )
-                exporter.export_flowsom_plots(
+                flowsom_figs = exporter.export_flowsom_plots(
                     mfi_matrix,
                     metaclustering,
                     n_metaclusters=int(metaclustering.max()) + 1,
                     condition_labels=condition_labels,
                 )
+                if isinstance(flowsom_figs, dict):
+                    _mpl_figures.update(
+                        {k: v for k, v in flowsom_figs.items() if v is not None}
+                    )
+
+                # ── Sankey gating ─────────────────────────────────────────
+                try:
+                    events = self._gating_logger.events
+                    gate_map = {e.gate_name: e for e in events if e.file == "COMBINED"}
+                    n_total = sum(s.matrix.shape[0] for s in samples)
+                    gate_counts = {
+                        "n_total": n_total,
+                        "n_g1_pass": gate_map["G1_debris"].n_after
+                        if "G1_debris" in gate_map
+                        else n_total,
+                        "n_g2_pass": gate_map["G2_singlets"].n_after
+                        if "G2_singlets" in gate_map
+                        else n_total,
+                        "n_g3_pass": gate_map["G3_cd45"].n_after
+                        if "G3_cd45" in gate_map
+                        else n_total,
+                        "n_final": int(metaclustering.shape[0]),
+                    }
+                    sankey_result = exporter.export_sankey(
+                        gate_counts,
+                        filter_blasts=getattr(config.pregate, "cd34", False),
+                    )
+                    if (
+                        isinstance(sankey_result, dict)
+                        and sankey_result.get("fig_sankey") is not None
+                    ):
+                        _plotly_figures["fig_sankey"] = sankey_result["fig_sankey"]
+                    _logger.info("Sankey exporté.")
+                except Exception as _e:
+                    _logger.warning("Sankey échoué (non bloquant): %s", _e)
+
+            # ── Étape 7: Mapping des populations (Section 10) ─────────────────
+            population_mapping_result = None
+            pop_map_cfg = getattr(config, "population_mapping", None)
+            if pop_map_cfg is not None and getattr(pop_map_cfg, "enabled", False):
+                _logger.info("Étape 7: Mapping populations via MFI (Section 10)...")
+                try:
+                    from flowsom_pipeline_pro.src.services.population_mapping_service import (
+                        PopulationMappingService,
+                    )
+
+                    # Trouver le FCS exporté à l'étape 6
+                    fcs_exported = None
+                    for key in (
+                        "fcs_complete",
+                        "fcs_with_clusters",
+                        "fcs_export",
+                        "fcs",
+                    ):
+                        p = export_paths.get(key)
+                        if p and Path(p).exists():
+                            fcs_exported = Path(p)
+                            break
+
+                    if fcs_exported is None:
+                        # Fallback : chercher le FCS le plus récent dans output_dir (récursif)
+                        fcs_candidates = sorted(
+                            output_dir.glob("**/*.fcs"),
+                            key=lambda f: f.stat().st_mtime,
+                            reverse=True,
+                        )
+                        if fcs_candidates:
+                            fcs_exported = fcs_candidates[0]
+
+                    if fcs_exported is not None:
+                        _logger.info("  FCS source: %s", fcs_exported.name)
+                        pm_service = PopulationMappingService(pop_map_cfg)
+                        population_mapping_result = pm_service.run_full_mapping(
+                            fcs_path=fcs_exported,
+                            cluster_data=clusterer,
+                            cell_data=None,  # AnnData non exposé ici — passer si disponible
+                            output_dir=output_dir,
+                            timestamp=timestamp,
+                        )
+                        _logger.info("Étape 7: Mapping populations OK.")
+                    else:
+                        _logger.warning(
+                            "Étape 7: FCS exporté introuvable — mapping ignoré."
+                        )
+
+                except Exception as exc:
+                    _logger.error("Étape 7 échouée (non bloquant): %s", exc)
+
+            # Récupérer les figures Plotly de la cartographie de populations
+            if population_mapping_result is not None:
+                pop_figs = getattr(population_mapping_result, "figures_plotly", {})
+                if pop_figs:
+                    _plotly_figures.update(
+                        {k: v for k, v in pop_figs.items() if v is not None}
+                    )
+
+            # ── Rapport HTML self-contained (APRÈS étape 7) ──────────────────
+            if viz_save:
+                try:
+                    _logger.info("Génération du rapport HTML...")
+                    mc_table = [
+                        {
+                            "metacluster": f"MC{int(mc)}",
+                            "n_cells": int((metaclustering == mc).sum()),
+                            "pct": round(float((metaclustering == mc).mean() * 100), 2),
+                            "top_markers": ", ".join(
+                                mfi_matrix.loc[f"MC{int(mc)}"]
+                                .nlargest(3)
+                                .index.tolist()
+                            )
+                            if f"MC{int(mc)}" in mfi_matrix.index
+                            else "",
+                        }
+                        for mc in np.unique(metaclustering)
+                    ]
+
+                    # ── Données par condition ──────────────────────────────
+                    condition_data: List[Dict] = []
+                    if "condition" in df_cells.columns:
+                        cond_counts = df_cells["condition"].value_counts()
+                        total_cells = len(df_cells)
+                        for cond_name, n_c in cond_counts.items():
+                            condition_data.append(
+                                {
+                                    "condition": str(cond_name),
+                                    "n_cells": int(n_c),
+                                    "pct": round(float(n_c / total_cells * 100), 1),
+                                }
+                            )
+
+                    # ── Données par fichier ────────────────────────────────
+                    files_data: List[Dict] = []
+                    file_col = next(
+                        (
+                            c
+                            for c in ("file_origin", "File_Origin")
+                            if c in df_cells.columns
+                        ),
+                        None,
+                    )
+                    if file_col:
+                        for fname, n_f in df_cells[file_col].value_counts().items():
+                            files_data.append(
+                                {
+                                    "file": str(fname),
+                                    "n_cells": int(n_f),
+                                }
+                            )
+
+                    # ── Labels des figures ─────────────────────────────────
+                    _FIGURE_LABELS = {
+                        "fig_overview": "Vue d'ensemble (pré-gating)",
+                        "fig_gate_debris": "QC Gate 1 — Exclusion Débris",
+                        "fig_gate_singlets": "QC Gate 2 — Exclusion Doublets",
+                        "fig_gate_cd45": "QC Gate 3 — Cellules CD45+",
+                        "fig_gate_cd34": "QC Gate 4 — Blastes CD34+",
+                        "fig_heatmap": "Heatmap MFI — Métaclusters × Marqueurs (Z-score)",
+                        "fig_comp": "Distribution Cellules par Métacluster",
+                        "fig_umap": "UMAP — Coloré par Métacluster FlowSOM",
+                        "fig_mst_static": "MST Statique — Topologie FlowSOM",
+                        "fig_sankey": "Diagramme Sankey — Flux de Gating",
+                        "fig_mst": "MST Interactif — Populations FlowSOM",
+                        "fig_grid_mc": "Grille SOM ScatterGL",
+                        "fig_heatmap_clinical": "Expression Phénotypique — Référence vs Métaclusters",
+                        "fig_barplots": "Blast Score — Profil Marqueurs",
+                        "fig_radar": "Profils Blast — Radar Charts",
+                        "fig_stars": "Blast Scores — Bar Chart",
+                    }
+
+                    html_path = exporter.export_html_report(
+                        analysis_params={
+                            "Transformation": config.transform.method,
+                            "Normalisation": config.normalize.method,
+                            "Grille SOM": f"{config.flowsom.xdim}×{config.flowsom.ydim}",
+                            "Métaclusters": n_meta,
+                            "Seed": config.flowsom.seed,
+                        },
+                        summary_stats={
+                            "n_cells": int(X_stacked.shape[0]),
+                            "n_markers": len(selected_markers),
+                            "n_files": len(samples),
+                            "n_clusters": n_meta,
+                        },
+                        metacluster_table=mc_table,
+                        markers=list(selected_markers),
+                        matplotlib_figures=_mpl_figures,
+                        plotly_figures=_plotly_figures,
+                        figure_labels=_FIGURE_LABELS,
+                        condition_data=condition_data,
+                        files_data=files_data,
+                        export_paths=export_paths,
+                    )
+                    if html_path:
+                        export_paths["html_report"] = html_path
+                        _logger.info("Rapport HTML: %s", html_path)
+                except Exception as _e:
+                    _logger.warning("Rapport HTML échoué (non bloquant): %s", _e)
 
             # ── Assemblage du résultat ────────────────────────────────────────
             elapsed = time.time() - start_time
@@ -196,6 +518,7 @@ class FlowSOMPipeline:
                 config_snapshot=config.to_dict() if hasattr(config, "to_dict") else {},
                 timestamp=timestamp,
                 elapsed_seconds=elapsed,
+                population_mapping=population_mapping_result,
             )
 
             _logger.info("=" * 60)
@@ -248,6 +571,141 @@ class FlowSOMPipeline:
                 _logger.info("  Dossier unique: %d fichiers", len(all_samples))
 
         return samples
+
+    # ------------------------------------------------------------------
+    # FCS export helpers (style monolithe flowsom_pipeline.py)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _circular_jitter(
+        n_points: int,
+        cluster_ids: np.ndarray,
+        node_sizes: np.ndarray,
+        max_radius: float = 0.45,
+        min_radius: float = 0.1,
+        seed: int = 42,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Jitter circulaire style FlowSOM R.
+
+        Le rayon de chaque cellule dépend de la taille de son node SOM.
+        On utilise sqrt(u) pour une distribution uniforme dans le disque.
+        """
+        rng = np.random.default_rng(seed)
+        theta = rng.uniform(0, 2 * np.pi, n_points)
+        u = rng.uniform(0, 1, n_points)
+        max_size = node_sizes.max() if node_sizes.max() > 0 else 1.0
+        radii = min_radius + (max_radius - min_radius) * np.sqrt(
+            node_sizes[cluster_ids.astype(int)] / max_size
+        )
+        r = np.sqrt(u) * radii
+        return (r * np.cos(theta)).astype(np.float32), (r * np.sin(theta)).astype(
+            np.float32
+        )
+
+    def _build_fcs_dataframe(
+        self,
+        processed_samples: List[FlowSample],
+        metaclustering: np.ndarray,
+        clustering: np.ndarray,
+        clusterer: "FlowSOMClusterer",
+    ) -> pd.DataFrame:
+        """
+        Construit le DataFrame complet pour l'export FCS compatible Kaluza.
+
+        Reproduit EXACTEMENT la logique de flowsom_pipeline.py :
+          1. Données brutes (pré-transformation) pour TOUS les marqueurs
+          2. FlowSOM_metacluster (1-based), FlowSOM_cluster (1-based)
+          3. xGrid, yGrid avec jitter circulaire (grille SOM)
+          4. xNodes, yNodes avec jitter circulaire (MST)
+          5. size (nb cellules par node)
+          6. Condition, Condition_Num, File_Origin
+
+        Returns:
+            DataFrame avec toutes les colonnes numériques prêtes pour fcswrite.
+        """
+        from flowsom_pipeline_pro.src.core.clustering import FlowSOMClusterer as _FSC
+
+        # ── 1. Données brutes (toutes colonnes) ───────────────────────────────
+        X_raw, raw_var_names, obs = stack_raw_markers(processed_samples)
+
+        n_cells = X_raw.shape[0]
+        n_nodes = clusterer.n_nodes
+
+        # ── 2. Taille de chaque node ───────────────────────────────────────────
+        node_sizes = clusterer.get_node_sizes()
+
+        # ── 3. Coordonnées grille SOM avec jitter circulaire ──────────────────
+        grid_coords = clusterer.get_grid_coords()  # (n_nodes, 2)
+
+        cl_int = clustering.astype(int)
+        xGrid_base = grid_coords[cl_int, 0].astype(np.float32)
+        yGrid_base = grid_coords[cl_int, 1].astype(np.float32)
+
+        jitter_x, jitter_y = self._circular_jitter(
+            n_cells, cl_int, node_sizes, max_radius=0.45, min_radius=0.1
+        )
+        xGrid_j = xGrid_base + jitter_x
+        yGrid_j = yGrid_base + jitter_y
+        # Décaler pour que min = 1 (comme le monolithe)
+        xGrid = xGrid_j - xGrid_j.min() + 1.0
+        yGrid = yGrid_j - yGrid_j.min() + 1.0
+
+        _logger.info("  xGrid: [%.3f – %.3f]", xGrid.min(), xGrid.max())
+        _logger.info("  yGrid: [%.3f – %.3f]", yGrid.min(), yGrid.max())
+
+        # ── 4. Coordonnées MST avec jitter circulaire ─────────────────────────
+        layout_coords = clusterer.get_layout_coords()  # (n_nodes, 2)
+        x_range = layout_coords[:, 0].ptp() if layout_coords[:, 0].ptp() > 0 else 1.0
+        y_range = layout_coords[:, 1].ptp() if layout_coords[:, 1].ptp() > 0 else 1.0
+        mst_scale = min(x_range, y_range) / (clusterer.xdim * 2)
+
+        xN_base = layout_coords[cl_int, 0].astype(np.float32)
+        yN_base = layout_coords[cl_int, 1].astype(np.float32)
+        mst_jx, mst_jy = self._circular_jitter(
+            n_cells,
+            cl_int,
+            node_sizes,
+            max_radius=mst_scale * 0.8,
+            min_radius=mst_scale * 0.2,
+        )
+        xNodes_j = xN_base + mst_jx
+        yNodes_j = yN_base + mst_jy
+        xNodes = xNodes_j - xNodes_j.min() + 1.0
+        yNodes = yNodes_j - yNodes_j.min() + 1.0
+
+        _logger.info("  xNodes: [%.3f – %.3f]", xNodes.min(), xNodes.max())
+        _logger.info("  yNodes: [%.3f – %.3f]", yNodes.min(), yNodes.max())
+
+        # ── 5. Assemblage ─────────────────────────────────────────────────────
+        df = pd.DataFrame(X_raw, columns=raw_var_names)
+
+        # Colonnes FlowSOM (+1 pour commencer à 1 dans Kaluza)
+        df["FlowSOM_metacluster"] = (metaclustering + 1).astype(np.float32)
+        df["FlowSOM_cluster"] = (clustering + 1).astype(np.float32)
+
+        # Coordonnées SOM
+        df["xGrid"] = xGrid.astype(np.float32)
+        df["yGrid"] = yGrid.astype(np.float32)
+        df["xNodes"] = xNodes.astype(np.float32)
+        df["yNodes"] = yNodes.astype(np.float32)
+
+        # Taille du node
+        df["size"] = node_sizes[cl_int].astype(np.float32)
+
+        # Métadonnées cellule
+        df["Condition"] = obs["condition"].values
+        df["Condition_Num"] = np.where(df["Condition"] == "Sain", 1.0, 2.0).astype(
+            np.float32
+        )
+        df["File_Origin"] = obs["file_origin"].values
+
+        _logger.info(
+            "  DataFrame FCS complet: %d cellules × %d colonnes",
+            df.shape[0],
+            df.shape[1],
+        )
+        return df
 
     def _compute_metrics(
         self,

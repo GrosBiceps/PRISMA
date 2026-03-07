@@ -140,8 +140,10 @@ class DownsamplingConfig:
 @dataclass
 class VisualizationConfig:
     save_plots: bool = True
+    umap_enabled: bool = True  # Calculer UMAP après clustering
     plot_format: str = DEFAULT_PLOT_FORMAT
     dpi: int = DEFAULT_DPI
+    figures: dict = field(default_factory=dict)  # Paramètres par figure
 
 
 @dataclass
@@ -152,6 +154,54 @@ class GPUConfig:
 @dataclass
 class LoggingConfig:
     level: str = "INFO"
+
+
+@dataclass
+class PopulationMappingConfig:
+    """Configuration Section 10 — Mapping des populations via MFI de référence."""
+
+    enabled: bool = True
+    ref_mfi_dir: str = "Data/Ref MFI"
+    cache_dir: str = "output/ref_mfi_parquet_cache"
+    # Distance et mapping
+    distance_percentile: int = 60
+    include_scatter: bool = True
+    normalization_method: str = "range"  # range | zscore
+    mapping_method: str = "cosine_prior"  # M12 recommandé ELN 2022
+    unknown_threshold_mode: str = "auto_otsu"  # auto_otsu | percentile | mean_std
+    hard_limit_factor: float = 5.0
+    prior_mode: str = "log10_cubed"
+    # Transformation des CSV de référence
+    transform_method: str = "arcsinh"  # arcsinh | logicle | none
+    arcsinh_cofactor: float = 5.0
+    apply_to_scatter: bool = False
+    # Stats biologiques (Mahalanobis / KNN)
+    knn_sample_size: int = 2000
+    knn_k: int = 15
+    cov_reg_alpha: float = 1e-4
+    total_knn_points: int = 15000
+    # Blast detection
+    blast_enabled: bool = True
+    blast_suspect_categories: List[str] = field(
+        default_factory=lambda: ["BLAST_HIGH", "BLAST_MODERATE"]
+    )
+    # Visualisation interactive (Plotly)
+    viz_interactive: bool = True
+    viz_max_points: int = 50_000
+    # Couleurs population
+    population_colors: dict = field(
+        default_factory=lambda: {
+            "Granulo": "#e26f1a",
+            "Granulocytes": "#e26f1a",
+            "Hématogone 34+": "#9467bd",
+            "Hematogones19+": "#2ca02c",
+            "Ly T_NK": "#17becf",
+            "Lymphos B": "#1f77b4",
+            "Lymphos": "#aec7e8",
+            "Plasmo": "#d62728",
+            "Unknown": "#7f7f7f",
+        }
+    )
 
 
 @dataclass
@@ -170,6 +220,9 @@ class PipelineConfig:
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
     gpu: GPUConfig = field(default_factory=GPUConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    population_mapping: PopulationMappingConfig = field(
+        default_factory=PopulationMappingConfig
+    )
 
     # ------------------------------------------------------------------
     # Constructeurs alternatifs
@@ -310,6 +363,39 @@ class PipelineConfig:
         lg = raw.get("logging", {})
         if "level" in lg:
             cfg.logging.level = lg["level"]
+
+        pm = raw.get("population_mapping", {})
+        if pm:
+            for attr in (
+                "enabled",
+                "ref_mfi_dir",
+                "cache_dir",
+                "distance_percentile",
+                "include_scatter",
+                "normalization_method",
+                "mapping_method",
+                "unknown_threshold_mode",
+                "hard_limit_factor",
+                "prior_mode",
+                "transform_method",
+                "arcsinh_cofactor",
+                "apply_to_scatter",
+                "knn_sample_size",
+                "knn_k",
+                "cov_reg_alpha",
+                "total_knn_points",
+                "blast_enabled",
+                "viz_interactive",
+                "viz_max_points",
+            ):
+                if attr in pm:
+                    setattr(cfg.population_mapping, attr, pm[attr])
+            if "blast_suspect_categories" in pm:
+                cfg.population_mapping.blast_suspect_categories = list(
+                    pm["blast_suspect_categories"]
+                )
+            if "population_colors" in pm:
+                cfg.population_mapping.population_colors = dict(pm["population_colors"])
 
         # Validation
         cfg._validate()

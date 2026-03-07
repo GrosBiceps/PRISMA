@@ -12,8 +12,16 @@ from .population_mapping import (
     _apply_bayesian_prior,
     compute_unknown_threshold,
     assign_with_auto_threshold,
-    filter_area_channels,
-    transform_reference_mfi,
+    filter_area_columns,
+    normalize_col_name,
+    build_direct_mapping_a_only,
+    load_population_csv_transformed,
+    compute_pop_stats_from_csv,
+    extract_node_centroids_from_fcs,
+    apply_cyto_transform_matrix,
+    arcsinh_transform,
+    robust_scale,
+    POPULATION_COLORS,
 )
 from .blast_detection import (
     build_blast_weights,

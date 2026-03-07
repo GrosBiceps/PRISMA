@@ -35,6 +35,8 @@ class FlowSample:
     data: pd.DataFrame
     metadata: Dict[str, Any] = field(default_factory=dict)
     n_cells_raw: int = 0
+    # Données brutes pré-transformation (valeurs linéaires pour export FCS Kaluza)
+    raw_data: Optional[pd.DataFrame] = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Constructeur alternatif
@@ -163,3 +165,28 @@ class FlowSample:
 
     def __repr__(self) -> str:
         return self.summary()
+
+
+# =======================================================================
+# FlowCytometrySample — Copie conforme du monolithe (alias simplifié)
+# =======================================================================
+try:
+    import flowsom as fs
+    _FS_AVAILABLE = True
+except ImportError:
+    _FS_AVAILABLE = False
+
+class FlowCytometrySample:
+    """
+    Classe utilitaire pour le chargement d'un fichier FCS en DataFrame pandas.
+    Utilisée par run_flowsom_pipeline() comme interface simplifiée.
+    """
+
+    @classmethod
+    def from_fcs(cls, fcs_file: str, verbose: bool = True) -> pd.DataFrame:
+        """Charge un fichier FCS et retourne un DataFrame pandas."""
+        adata = fs.io.read_FCS(fcs_file)
+        df = pd.DataFrame(adata.X, columns=list(adata.var_names))
+        if verbose:
+            print(f"    [OK] {Path(fcs_file).name}: {len(df):,} cellules")
+        return df

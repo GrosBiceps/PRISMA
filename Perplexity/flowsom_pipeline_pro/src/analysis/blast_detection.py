@@ -211,3 +211,197 @@ def compute_reference_normalization(
 
     X_norm = (X_unknown - ref_min) / ref_range
     return X_norm, ref_min, ref_range
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  §10.4d — Traçabilité FCS source des cellules blast
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def trace_blast_cells_to_fcs_source(
+    blast_candidates_df: pd.DataFrame,
+    cell_data: "Any",  # anndata.AnnData
+    source_priority_cols: Optional[List[str]] = None,
+    condition_col: Optional[str] = "Condition",
+    blast_categories_to_trace: Optional[List[str]] = None,
+    alert_patho_threshold: float = 0.50,
+) -> pd.DataFrame:
+    """
+    Pour chaque nœud candidat blast, retrace quelles cellules proviennent
+    de quel fichier FCS source et quelle condition (Sain/Patho/FU).
+
+    Utilisation clinique ELN 2022 : si >50% des cellules d'un nœud BLAST_HIGH
+    proviennent d'un fichier "Patho" (diagnostic ou suivi), déclencher une
+    ALERTE CLINIQUE.
+
+    Args:
+        blast_candidates_df: DataFrame de build_blast_score_dataframe (colonnes:
+                              node_id, blast_score, blast_category, ...).
+        cell_data: AnnData avec .obs['clustering'] (nœud SOM, 0-indexé) et
+                   .obs[condition_col] (condition de la cellule).
+        source_priority_cols: Colonnes .obs à inspecter pour retrouver le fichier
+                               source (ex: ['File_Origin', 'filename']).
+        condition_col: Colonne de condition dans cell_data.obs.
+        blast_categories_to_trace: Catégories à inclure dans la traçabilité.
+                                    Défaut: ['BLAST_HIGH', 'BLAST_MODERATE'].
+        alert_patho_threshold: Fraction de cellules Pathologiques déclenchant
+                                l'ALERTE CLINIQUE (défaut 0.50 = 50%).
+
+    Returns:
+        DataFrame avec colonnes:
+          - node_id, blast_score, blast_category
+          - n_cells_total, n_cells_patho, n_cells_sain, pct_patho
+          - source_files (str, liste des fichiers sources)
+          - clinical_alert (bool)
+    """
+    if blast_categories_to_trace is None:
+        blast_categories_to_trace = ["BLAST_HIGH", "BLAST_MODERATE"]
+
+    # Sélectionner uniquement les nœuds à tracer
+    mask_trace = blast_candidates_df["blast_category"].isin(blast_categories_to_trace)
+    df_trace = blast_candidates_df[mask_trace].copy()
+
+    if df_trace.empty:
+        _logger.info("Aucun nœud blast à tracer pour ces catégories.")
+        return df_trace
+
+    # ── Résoudre la colonne de clustering dans cell_data ─────────────────────
+    obs_df = None
+    try:
+        obs_df = cell_data.obs.copy()
+    except AttributeError:
+        # cell_data est peut-être déjà un DataFrame
+        if isinstance(cell_data, pd.DataFrame):
+            obs_df = cell_data.copy()
+
+    if obs_df is None:
+        _logger.warning("cell_data.obs inaccessible — traçabilité impossible.")
+        df_trace["n_cells_total"] = 0
+        df_trace["clinical_alert"] = False
+        return df_trace
+
+    # Trouver la colonne de nœud SOM dans obs_df
+    clustering_col = None
+    for candidate in ["clustering", "FlowSOM_cluster", "cluster", "node_id"]:
+        if candidate in obs_df.columns:
+            clustering_col = candidate
+            break
+
+    if clustering_col is None:
+        _logger.warning("Colonne clustering introuvable dans cell_data.obs.")
+        df_trace["n_cells_total"] = 0
+        df_trace["clinical_alert"] = False
+        return df_trace
+
+    # ── Résoudre la colonne source de fichier ─────────────────────────────────
+    source_col = None
+    if source_priority_cols:
+        for col in source_priority_cols:
+            if col in obs_df.columns:
+                source_col = col
+                break
+    if source_col is None:
+        for candidate in [
+            "File_Origin",
+            "filename",
+            "Filename",
+            "sample_id",
+            "SampleID",
+        ]:
+            if candidate in obs_df.columns:
+                source_col = candidate
+                break
+
+    # ── Traçabilité nœud par nœud ─────────────────────────────────────────────
+    records: List[Dict] = []
+
+    for _, row in df_trace.iterrows():
+        node_id = int(row["node_id"])
+        blast_score = float(row["blast_score"])
+        blast_category = str(row["blast_category"])
+
+        # Sélectionner les cellules de ce nœud (0-indexé)
+        mask_node = obs_df[clustering_col].astype(int) == node_id
+        cells_in_node = obs_df[mask_node]
+        n_total = len(cells_in_node)
+
+        if n_total == 0:
+            records.append(
+                {
+                    "node_id": node_id,
+                    "blast_score": blast_score,
+                    "blast_category": blast_category,
+                    "n_cells_total": 0,
+                    "n_cells_patho": 0,
+                    "n_cells_sain": 0,
+                    "pct_patho": 0.0,
+                    "source_files": "",
+                    "clinical_alert": False,
+                }
+            )
+            continue
+
+        # Compter par condition
+        n_patho = 0
+        n_sain = 0
+        if condition_col and condition_col in cells_in_node.columns:
+            cond_vals = cells_in_node[condition_col].astype(str).str.upper()
+            n_patho = int(
+                (cond_vals.str.contains("PATHO|DIAG|DX|LAM|AML", na=False)).sum()
+            )
+            n_sain = int(
+                (cond_vals.str.contains("SAIN|NORMAL|NBM|HEALTHY", na=False)).sum()
+            )
+
+        pct_patho = n_patho / max(n_total, 1)
+        clinical_alert = (blast_category == "BLAST_HIGH") and (
+            pct_patho >= alert_patho_threshold
+        )
+
+        if clinical_alert:
+            _logger.warning(
+                "ALERTE CLINIQUE — Nœud %d (%s) : %.1f%% cellules Pathologiques "
+                "(%d/%d cellules)",
+                node_id,
+                blast_category,
+                100.0 * pct_patho,
+                n_patho,
+                n_total,
+            )
+
+        # Fichiers sources
+        source_files_str = ""
+        if source_col:
+            src_counts = cells_in_node[source_col].value_counts()
+            source_files_str = " | ".join(
+                f"{fname}({cnt})" for fname, cnt in src_counts.items()
+            )
+
+        records.append(
+            {
+                "node_id": node_id,
+                "blast_score": blast_score,
+                "blast_category": blast_category,
+                "n_cells_total": n_total,
+                "n_cells_patho": n_patho,
+                "n_cells_sain": n_sain,
+                "pct_patho": round(pct_patho * 100.0, 1),
+                "source_files": source_files_str,
+                "clinical_alert": clinical_alert,
+            }
+        )
+
+    result_df = (
+        pd.DataFrame(records)
+        .sort_values(["blast_category", "blast_score"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+    n_alerts = int(result_df["clinical_alert"].sum())
+    _logger.info(
+        "Traçabilité terminée: %d nœuds tracés, %d ALERTE(S) CLINIQUE(S)",
+        len(result_df),
+        n_alerts,
+    )
+
+    return result_df

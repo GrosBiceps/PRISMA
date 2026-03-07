@@ -159,3 +159,64 @@ def load_as_flow_samples(
         samples.append(sample)
 
     return samples
+
+# =======================================================================
+# Copies conformes du monolithe — Versions exactes extraites de
+# flowsom_pipeline.py
+# =======================================================================
+
+def get_fcs_files(folder: Path) -> List[str]:
+    """Récupère la liste des fichiers FCS dans un dossier. Et renvoie une chaine de caractère"""
+    if not folder.exists():
+        print(f"[!] Dossier non trouvé: {folder}")
+        return []
+
+    files = set()
+    for f in folder.glob("*.fcs"):
+        files.add(str(f))
+    for f in folder.glob("*.FCS"):
+        files.add(str(f))
+
+    return sorted(list(files))
+
+
+def load_fcs_files(files: List[str], condition: str = "Unknown") -> List[ad.AnnData]:
+    """
+    Charge plusieurs fichiers FCS et retourne une liste d'AnnData.
+
+    Args:
+        files: Liste des chemins de fichiers FCS
+        condition: Label de condition ("Sain" ou "Pathologique")
+
+    Returns:
+        Liste d'objets AnnData
+    """
+    # La ligne suivante crée la liste vide pour stocker les AnnData puis boucle sur chaque fichier (éviter le plantage complet)
+    adatas = []
+
+    for fpath in files:
+        try:
+            print(f"    Chargement: {Path(fpath).name}...", end=" ")
+
+            # Lecture avec la fonction de base de flowsom
+            adata = fs.io.read_FCS(fpath)
+
+            # Ajouter les métadonnées avec un nombre de cellules qui sera égale a la forme de l'objet adata
+            n_cells = adata.shape[0]
+            adata.obs["condition"] = (
+                condition  # Rajoute la condition du fichier : "Sain" ou "Pathologique"
+            )
+            adata.obs["file_origin"] = Path(
+                fpath
+            ).name  # Rajoute une observation avec Nom du fichier source (obs = One-dimensional annotation of observations)
+
+            adatas.append(adata)  # Ajoute à la liste des AnnData
+            print(f"{n_cells:,} cellules")
+
+        except Exception as e:
+            print(f"Erreur: {e}")
+
+    return adatas
+
+
+# Logs sur le cahrgement des fichiers

@@ -57,6 +57,7 @@ class PipelineResult:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     elapsed_seconds: float = 0.0
     warnings: List[str] = field(default_factory=list)
+    population_mapping: Optional[Any] = None  # PopulationMappingResult (§10)
 
     # ------------------------------------------------------------------
     # Accès

@@ -5,12 +5,14 @@ Toutes les méthodes sont statiques et sans état : elles transforment
 un ndarray et le retournent. La sélection de la méthode à appliquer
 est déléguée à PreprocessingService.
 
-Méthodes disponibles:
+Méthodes disponibles (monolithe exact + apply() dispatcher):
     - arcsinh_transform  : Standard pour cytométrie en flux (cofacteur 5)
+    - arcsinh_inverse    : Inverse de l'arcsinh
     - logicle_transform  : Biexponentielle précise (FlowKit si disponible)
-    - log10_transform    : Log base 10 sur valeurs positives
+    - log_transform      : Log base 10 sur valeurs positives
     - zscore_normalize   : Centrage-réduction (moyenne=0, std=1)
     - min_max_normalize  : Mise à l'échelle [0, 1]
+    - apply()            : Dispatcher (architecture)
 """
 
 from __future__ import annotations
@@ -24,61 +26,35 @@ import numpy as np
 try:
     import flowkit as fk
 
-    _FLOWKIT_AVAILABLE = True
+    FLOWKIT_AVAILABLE = True
 except ImportError:
-    _FLOWKIT_AVAILABLE = False
+    FLOWKIT_AVAILABLE = False
+    fk = None
 
 
 class DataTransformer:
     """
-    Transformations de données de cytométrie.
-
-    Toutes les méthodes sont statiques : pas besoin d'instancier la classe.
-    Aucun état global n'est modifié.
+    Transformations de données de cytométrie (Logicle, Arcsinh, etc.).
+    Classe statique réutilisable sans dépendance à l'UI.
     """
 
-    # ------------------------------------------------------------------
-    # Transformations
-    # ------------------------------------------------------------------
-
     @staticmethod
-    def arcsinh_transform(
-        data: np.ndarray,
-        cofactor: float = 5.0,
-    ) -> np.ndarray:
+    def arcsinh_transform(data: np.ndarray, cofactor: float = 5.0) -> np.ndarray:
         """
-        Transformation Arcsinh (inverse sinus hyperbolique).
+        Transformation Arcsinh (inverse hyperbolic sine).
 
-        C'est la transformation de référence pour la cytométrie en flux :
-        elle gère les valeurs négatives (artefacts de compensation) et
-        comprime les grandes valeurs sans saturation.
-
-        Args:
-            data: Matrice (n_cells, n_markers) ou vecteur (n_cells,).
-            cofactor: Facteur de division avant l'arcsinh.
-                - 5   = standard cytométrie en flux (immunophénotypage)
-                - 150 = cytométrie de masse (CyTOF)
+        Args en entrée:
+            data: Matrice de données (n_cells, n_markers)
+            cofactor: Facteur de division (5 pour flow cytometry)
 
         Returns:
-            Données transformées, même shape que l'entrée.
+            Données transformées
         """
         return np.arcsinh(data / cofactor)
 
     @staticmethod
-    def arcsinh_inverse(
-        data: np.ndarray,
-        cofactor: float = 5.0,
-    ) -> np.ndarray:
-        """
-        Inverse de la transformation Arcsinh (retour à l'espace d'intensité).
-
-        Args:
-            data: Données transformées.
-            cofactor: Même cofacteur que pour arcsinh_transform.
-
-        Returns:
-            Données en espace d'intensité original.
-        """
+    def arcsinh_inverse(data: np.ndarray, cofactor: float = 5.0) -> np.ndarray:
+        """Inverse de la transformation Arcsinh."""
         return np.sinh(data) * cofactor
 
     @staticmethod
@@ -92,127 +68,110 @@ class DataTransformer:
         """
         Transformation Logicle (biexponentielle).
 
-        Utilise FlowKit si disponible (plus précis scientifiquement).
-        Sinon, applique une approximation par arcsinh modifié.
-
-        L'avantage de la Logicle sur l'arcsinh est la linéarisation
-        naturelle de la zone négative/proche de zéro selon les paramètres
-        d'acquisition (T, M, W définis dans le fichier FCS).
-
-        Args:
-            data: Matrice ou vecteur de données.
-            T: Maximum de l'échelle (262144 = 2^18 standard).
-            M: Largeur en décades de la partie log.
-            W: Partie linéaire (linéarisation proche de zéro).
-            A: Décades additionnelles pour valeurs négatives.
+        Args en entrée:
+            data: Matrice de données
+            T: Maximum de l'échelle linéaire (262144 = 2^18)
+            M: Décades de largeur
+            W: Linéarisation près de zéro
+            A: Décades additionnelles (négatifs)
 
         Returns:
-            Données transformées.
+            Données transformées
         """
-        if _FLOWKIT_AVAILABLE:
+        if FLOWKIT_AVAILABLE:
+            # Utiliser FlowKit si disponible (plus précis) avec une fonction prédéfinie
             try:
-                xform = fk.transforms.LogicleTransform(
-                    param_t=T, param_w=W, param_m=M, param_a=A
-                )
+                xform = fk.transforms.LogicleTransform(T=T, M=M, W=W, A=A)
                 return xform.apply(data)
-            except Exception as e:
-                warnings.warn(
-                    f"FlowKit LogicleTransform échoué ({e}), "
-                    "utilisation de l'approximation arcsinh modifié."
-                )
+            except:
+                pass
 
-        # Approximation sans FlowKit: arcsinh modifié
-        # Source: Parks et al. (2006) Cytometry A
+        # Approximation si FlowKit absent: Arcsinh modifié
+        w_val = W * np.log10(np.e)
         return np.arcsinh(data / (T / (10**M))) * (M / np.log(10))
 
     @staticmethod
-    def log10_transform(
-        data: np.ndarray,
-        min_val: float = 1.0,
+    def log_transform(
+        data: np.ndarray, base: float = 10.0, min_val: float = 1.0
     ) -> np.ndarray:
-        """
-        Transformation log base 10.
-
-        Les valeurs <= 0 sont clippées à min_val avant transformation
-        pour éviter les NaN/Inf.
-
-        Args:
-            data: Matrice ou vecteur de données.
-            min_val: Valeur minimum avant log (évite log(0)).
-
-        Returns:
-            Données transformées.
-        """
-        return np.log10(np.maximum(data, min_val))
+        """Transformation logarithmique standard."""
+        data_clipped = np.maximum(data, min_val)
+        return np.log(data_clipped) / np.log(base)
 
     @staticmethod
+    def zscore_normalize(data: np.ndarray) -> np.ndarray:
+        """Normalisation Z-score (moyenne=0, std=1)."""
+        mean = np.nanmean(data, axis=0)
+        std = np.nanstd(data, axis=0)
+        std[std == 0] = 1  # Éviter division par zéro
+        return (data - mean) / std
+
+    @staticmethod
+    def min_max_normalize(data: np.ndarray) -> np.ndarray:
+        """Normalisation Min-Max [0, 1]."""
+        min_val = np.nanmin(data, axis=0)
+        max_val = np.nanmax(data, axis=0)
+        range_val = max_val - min_val
+        range_val[range_val == 0] = 1
+        return (data - min_val) / range_val
+    @staticmethod
     def apply(
-        data: np.ndarray,
+        data,
         method: str,
         cofactor: float = 5.0,
-        var_names: Optional[List[str]] = None,
+        var_names=None,
         apply_to_scatter: bool = False,
-    ) -> np.ndarray:
+    ):
         """
         Applique la transformation spécifiée, avec gestion optionnelle
         des canaux scatter (FSC/SSC/Time).
 
         Args:
             data: Matrice (n_cells, n_markers).
-            method: 'arcsinh' | 'logicle' | 'log10' | 'none'.
+            method: 'arcsinh' | 'logicle' | 'log10' | 'log' | 'none'.
             cofactor: Cofacteur pour arcsinh.
-            var_names: Noms des colonnes (même ordre que data).
-                Si fourni et apply_to_scatter=False, les colonnes
-                FSC/SSC/Time sont exclues de la transformation.
-            apply_to_scatter: Si True, transforme TOUS les canaux
-                y compris FSC/SSC/Time.
+            var_names: Noms des colonnes.
+            apply_to_scatter: Si True, transforme TOUS les canaux.
 
         Returns:
             Données transformées (même shape que data).
-
-        Raises:
-            ValueError: Si la méthode est inconnue.
         """
-        from flowsom_pipeline_pro.config.constants import SCATTER_PATTERNS
         import re
+        import numpy as np
+        try:
+            from flowsom_pipeline_pro.config.constants import SCATTER_PATTERNS
+        except Exception:
+            SCATTER_PATTERNS = ["FSC", "SSC", "TIME", "EVENT"]
 
         method_lc = method.lower()
         if method_lc == "none":
-            return data.copy() if isinstance(data, np.ndarray) else np.array(data)
+            return data.copy() if hasattr(data, "copy") else np.array(data)
 
-        # Déterminer les indices à transformer
         if var_names is not None and not apply_to_scatter:
-            scatter_patterns = SCATTER_PATTERNS
             fluorescence_idx = [
                 i
                 for i, name in enumerate(var_names)
-                if not any(re.search(p, name, re.IGNORECASE) for p in scatter_patterns)
+                if not any(re.search(p, name, re.IGNORECASE) for p in SCATTER_PATTERNS)
             ]
-            scatter_idx = [i for i in range(data.shape[1]) if i not in fluorescence_idx]
         else:
             fluorescence_idx = list(range(data.shape[1]))
-            scatter_idx = []
 
-        result = (
-            data.copy() if isinstance(data, np.ndarray) else np.array(data, dtype=float)
-        )
-
+        result = data.copy() if hasattr(data, "copy") else np.array(data, dtype=float)
         if not fluorescence_idx:
             return result
-
         sub = result[:, fluorescence_idx]
 
         if method_lc == "arcsinh":
             transformed = DataTransformer.arcsinh_transform(sub, cofactor=cofactor)
         elif method_lc == "logicle":
             transformed = DataTransformer.logicle_transform(sub)
-        elif method_lc == "log10":
-            transformed = DataTransformer.log10_transform(sub)
+        elif method_lc in ("log10", "log"):
+            transformed = DataTransformer.log_transform(sub)
         else:
             raise ValueError(
                 f"Méthode de transformation inconnue: '{method}'. "
                 "Valeurs acceptées: 'arcsinh', 'logicle', 'log10', 'none'."
             )
-
         result[:, fluorescence_idx] = transformed
         return result
+

@@ -25,6 +25,7 @@ MRD_LOD: float = 9e-5  # Limite de détection  (0.009%)
 MRD_LOQ: float = 5e-5  # Limite de quantification (0.005%)
 NBM_FREQ_MAX: float = 0.011  # Fréquence max CD34+ dans moelle normale (1.1%)
 FOLD_CHANGE_MRD: float = 1.9  # Fold-change FU/NBM pour positivité MRD
+MRD_FOLD_CHANGE_THRESHOLD: float = FOLD_CHANGE_MRD  # Alias (backward compat)
 MIN_EVENTS_PER_NODE: int = 17  # ELN : minimum d'événements par node FlowSOM
 
 # ---------------------------------------------------------------------------
