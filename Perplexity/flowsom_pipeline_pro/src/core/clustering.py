@@ -1,0 +1,803 @@
+"""
+clustering.py — Orchestration du clustering FlowSOM.
+
+Ce module encapsule l'entraînement du SOM, le métaclustering hiérarchique,
+et l'auto-optimisation du nombre de clusters (stabilité + silhouette).
+
+Hiérarchie d'estimateurs (ordre de priorité):
+  1. GPUFlowSOMEstimator  (CuPy/CUDA, si gpu.enabled=True et CUDA dispo)
+  2. fs.FlowSOM           (CPU, package flowsom officiel)
+
+Usage:
+    clusterer = FlowSOMClusterer(config.flowsom, config.gpu)
+    result = clusterer.fit(X, used_markers)
+"""
+
+from __future__ import annotations
+
+import warnings
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
+# Imports conditionnels — wrappés pour graceful fallback
+try:
+    import flowsom as fs
+
+    _FLOWSOM_AVAILABLE = True
+except ImportError:
+    _FLOWSOM_AVAILABLE = False
+    warnings.warn("flowsom non installé: pip install flowsom")
+
+try:
+    import sys
+    import os
+
+    _gpu_path = r"C:\Users\Florian Travail\Documents\FlowSom"
+    if _gpu_path not in sys.path:
+        sys.path.insert(0, _gpu_path)
+    from FlowSomGpu.models import GPUFlowSOMEstimator
+
+    _GPU_AVAILABLE = True
+except Exception:
+    _GPU_AVAILABLE = False
+    GPUFlowSOMEstimator = None
+
+
+def compute_optimal_rlen(n_cells: int, rlen_setting: Any = "auto") -> int:
+    """
+    Calcule rlen optimal basé sur la taille du dataset.
+
+    Formule littérature: rlen ∝ √N × 0.1, borné [10, 100].
+    Exemples:
+        10k   cellules → rlen ≈ 10
+        100k  cellules → rlen ≈ 31
+        500k  cellules → rlen ≈ 70
+        1M    cellules → rlen ≈ 100
+
+    Args:
+        n_cells: Nombre de cellules dans le dataset.
+        rlen_setting: 'auto' ou entier explicite.
+
+    Returns:
+        Valeur rlen calculée ou passée explicitement.
+    """
+    if isinstance(rlen_setting, int):
+        return rlen_setting
+    return max(10, min(100, int(np.sqrt(n_cells) * 0.1)))
+
+
+def compute_optimal_grid(
+    n_cells: int,
+    xdim: int = 10,
+    ydim: int = 10,
+) -> Tuple[int, int]:
+    """
+    Ajuste la grille SOM si peu de cellules.
+
+    < 50k cellules → 7×7 recommandé (éviter trop de nodes vides).
+
+    Args:
+        n_cells: Nombre de cellules.
+        xdim: Dimension X configurée.
+        ydim: Dimension Y configurée.
+
+    Returns:
+        Tuple (xdim_final, ydim_final).
+    """
+    if n_cells < 50_000 and xdim == 10 and ydim == 10:
+        return 7, 7
+    return xdim, ydim
+
+
+class FlowSOMClusterer:
+    """
+    Orchestre l'entraînement FlowSOM et le métaclustering.
+
+    Args:
+        xdim: Dimension X de la grille SOM.
+        ydim: Dimension Y de la grille SOM.
+        n_metaclusters: Nombre de métaclusters.
+        rlen: Itérations SOM ('auto' ou entier).
+        seed: Graine aléatoire.
+        use_gpu: Activer GPUFlowSOMEstimator si disponible.
+        learning_rate: Taux d'apprentissage SOM.
+        sigma: Sigma de voisinage SOM.
+    """
+
+    def __init__(
+        self,
+        xdim: int = 10,
+        ydim: int = 10,
+        n_metaclusters: int = 8,
+        rlen: Any = "auto",
+        seed: int = 42,
+        use_gpu: bool = True,
+        learning_rate: float = 0.05,
+        sigma: float = 1.5,
+    ) -> None:
+        self.xdim = xdim
+        self.ydim = ydim
+        self.n_metaclusters = n_metaclusters
+        self.rlen = rlen
+        self.seed = seed
+        self.use_gpu = use_gpu
+        self.learning_rate = learning_rate
+        self.sigma = sigma
+
+        self._fsom_model: Optional[Any] = None
+        self.node_assignments_: Optional[np.ndarray] = None
+        self.metacluster_map_: Optional[np.ndarray] = None  # node→metacluster
+        self.metacluster_assignments_: Optional[np.ndarray] = None  # cell→metacluster
+        self.used_gpu_: bool = False
+
+    # ------------------------------------------------------------------
+    # Fit
+    # ------------------------------------------------------------------
+
+    def fit(
+        self,
+        X: np.ndarray,
+        marker_names: Optional[List[str]] = None,
+    ) -> "FlowSOMClusterer":
+        """
+        Entraîne le modèle FlowSOM sur les données X.
+
+        Args:
+            X: Matrice (n_cells, n_markers) — doit être transformée et normalisée.
+            marker_names: Noms des marqueurs (pour logging).
+
+        Returns:
+            self (pour chaînage).
+
+        Raises:
+            ImportError: Si aucun backend FlowSOM n'est disponible.
+            ValueError: Si X contient des NaN ou Inf.
+        """
+        # Validation critique (NaN/Inf font planter FlowSOM silencieusement)
+        n_nan = np.isnan(X).sum()
+        n_inf = np.isinf(X).sum()
+        if n_nan > 0 or n_inf > 0:
+            raise ValueError(
+                f"X contient {n_nan} NaN et {n_inf} Inf. "
+                "Nettoyer les données avant FlowSOM."
+            )
+
+        n_cells = X.shape[0]
+        xdim, ydim = compute_optimal_grid(n_cells, self.xdim, self.ydim)
+        rlen = compute_optimal_rlen(n_cells, self.rlen)
+
+        # ── Tentative GPU ──────────────────────────────────────────────
+        if self.use_gpu and _GPU_AVAILABLE and GPUFlowSOMEstimator is not None:
+            try:
+                self._fsom_model = GPUFlowSOMEstimator(
+                    xdim=xdim,
+                    ydim=ydim,
+                    n_clusters=self.n_metaclusters,
+                    learning_rate=self.learning_rate,
+                    sigma=self.sigma,
+                    seed=self.seed,
+                )
+                self._fsom_model.fit_predict(X)
+                self.used_gpu_ = True
+                print(f"[OK] FlowSOM GPU — grille {xdim}×{ydim}, rlen={rlen}")
+                self._extract_assignments_gpu(X)
+                return self
+            except Exception as e:
+                warnings.warn(f"GPU FlowSOM échoué ({e}), basculement CPU.")
+
+        # ── CPU (flowsom officiel) ─────────────────────────────────────
+        if not _FLOWSOM_AVAILABLE:
+            raise ImportError(
+                "Aucun backend FlowSOM disponible. Installer: pip install flowsom"
+            )
+
+        try:
+            import anndata as ad
+
+            adata = ad.AnnData(X)
+            if marker_names:
+                adata.var_names = marker_names[: X.shape[1]]
+
+            self._fsom_model = fs.FlowSOM(
+                adata,
+                cols_to_use=list(range(X.shape[1])),
+                xdim=xdim,
+                ydim=ydim,
+                n_clusters=self.n_metaclusters,
+                rlen=rlen,
+                seed=self.seed,
+            )
+            self.used_gpu_ = False
+            print(
+                f"[OK] FlowSOM CPU — grille {xdim}×{ydim}, "
+                f"rlen={rlen}, k={self.n_metaclusters}"
+            )
+            self._extract_assignments_cpu(X)
+
+        except Exception as e:
+            raise RuntimeError(f"FlowSOM CPU échoué: {e}") from e
+
+        return self
+
+    def _extract_assignments_gpu(self, X: np.ndarray) -> None:
+        """Extrait les assignations depuis le modèle GPU (BaseFlowSOMEstimator)."""
+        try:
+            # fit_predict() a déjà renseigné cluster_labels_ et labels_
+            self.node_assignments_ = np.asarray(
+                self._fsom_model.cluster_labels_, dtype=int
+            )
+            self.metacluster_assignments_ = np.asarray(
+                self._fsom_model.labels_, dtype=int
+            )
+            if hasattr(self._fsom_model, "_y_codes"):
+                self.metacluster_map_ = np.asarray(self._fsom_model._y_codes, dtype=int)
+        except Exception as e:
+            warnings.warn(f"Extraction assignations GPU échouée: {e}")
+
+    def _extract_assignments_cpu(self, X: np.ndarray) -> None:
+        """Extrait les assignations depuis le modèle CPU (flowsom)."""
+        try:
+            fsom = self._fsom_model
+            # fs.FlowSOM retourne directement les cluster assignments
+            if hasattr(fsom, "obs") and "clustering" in fsom.obs.columns:
+                self.node_assignments_ = fsom.obs["clustering"].values.astype(int)
+            elif hasattr(fsom, "cluster_labels_"):
+                self.node_assignments_ = fsom.cluster_labels_.astype(int)
+            else:
+                self.node_assignments_ = np.zeros(X.shape[0], dtype=int)
+                warnings.warn(
+                    "Impossible d'extraire node_assignments depuis flowsom CPU"
+                )
+
+            if hasattr(fsom, "obs") and "metaclustering" in fsom.obs.columns:
+                self.metacluster_assignments_ = fsom.obs[
+                    "metaclustering"
+                ].values.astype(int)
+            else:
+                # Recalcul par AgglomerativeClustering sur le codebook
+                self._recompute_metaclusters()
+
+        except Exception as e:
+            warnings.warn(f"Extraction assignations CPU échouée: {e}")
+
+    def _recompute_metaclusters(self) -> None:
+        """Recalcule les métaclusters par clustering hiérarchique sur le codebook SOM."""
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+
+            if self._fsom_model is None or self.node_assignments_ is None:
+                return
+
+            # Obtenir le codebook (centroïdes des nodes)
+            if hasattr(self._fsom_model, "codes"):
+                codebook = self._fsom_model.codes
+            elif hasattr(self._fsom_model, "model") and hasattr(
+                self._fsom_model.model, "codes"
+            ):
+                codebook = self._fsom_model.model.codes
+            else:
+                return
+
+            n_nodes = codebook.shape[0]
+            agg = AgglomerativeClustering(
+                n_clusters=min(self.n_metaclusters, n_nodes),
+                linkage="ward",
+            )
+            self.metacluster_map_ = agg.fit_predict(codebook).astype(int)
+            self.metacluster_assignments_ = self.metacluster_map_[
+                self.node_assignments_
+            ]
+        except Exception as e:
+            warnings.warn(f"Recalcul métaclusters échoué: {e}")
+
+    # ------------------------------------------------------------------
+    # Propriétés de résultat
+    # ------------------------------------------------------------------
+
+    @property
+    def n_nodes(self) -> int:
+        """Nombre total de nodes dans la grille SOM."""
+        return self.xdim * self.ydim
+
+    def get_mfi_matrix(
+        self,
+        X: np.ndarray,
+        marker_names: List[str],
+    ) -> "np.ndarray":
+        """
+        Calcule la matrice MFI (Mean Fluorescence Intensity) par métacluster.
+
+        Args:
+            X: Matrice de données transformées (n_cells, n_markers).
+            marker_names: Noms des marqueurs.
+
+        Returns:
+            Matrice (n_metaclusters, n_markers).
+
+        Raises:
+            RuntimeError: Si les assignations ne sont pas disponibles.
+        """
+        if self.metacluster_assignments_ is None:
+            raise RuntimeError("fit() doit être appelé avant get_mfi_matrix()")
+
+        unique_mc = np.unique(self.metacluster_assignments_)
+        mfi = np.zeros((len(unique_mc), X.shape[1]))
+        for i, mc in enumerate(unique_mc):
+            cells_mc = X[self.metacluster_assignments_ == mc]
+            mfi[i] = np.median(cells_mc, axis=0)  # Médiane = MFI robuste
+
+        return mfi
+
+    def summary(self) -> str:
+        """Résumé du clustering."""
+        backend = "GPU" if self.used_gpu_ else "CPU"
+        n_cells = (
+            len(self.node_assignments_) if self.node_assignments_ is not None else 0
+        )
+        return (
+            f"FlowSOMClusterer({backend}, grid={self.xdim}×{self.ydim}, "
+            f"k={self.n_metaclusters}, cells={n_cells:,})"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Optimisation multi-critères du nombre de clusters (3 phases)
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from sklearn.metrics import silhouette_score
+    from sklearn.cluster import AgglomerativeClustering
+
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+
+try:
+    from sklearn.metrics import adjusted_rand_score as _ari_score
+
+    _ARI_AVAILABLE = True
+except ImportError:
+    _ARI_AVAILABLE = False
+
+
+def _get_logger_clustering():
+    """Logger local pour éviter la circularité d'import."""
+    import logging
+
+    return logging.getLogger("core.clustering.stability")
+
+
+def _train_som_codebook(
+    X: np.ndarray,
+    xdim: int,
+    ydim: int,
+    n_metaclusters: int,
+    rlen: int,
+    seed: int,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Entraîne un SOM et retourne (codebook, node_assignments).
+
+    Returns None si aucun backend disponible ou si l'entraînement échoue.
+    """
+    try:
+        if _GPU_AVAILABLE and GPUFlowSOMEstimator is not None:
+            est = GPUFlowSOMEstimator(
+                xdim=xdim,
+                ydim=ydim,
+                n_clusters=n_metaclusters,
+                seed=seed,
+            )
+            est.fit_predict(X)
+            node_assignments = np.asarray(est.cluster_labels_, dtype=int)
+
+            # Codebook = centroïdes des nodes
+            if hasattr(est, "codes_"):
+                codebook = np.asarray(est.codes_)
+            elif hasattr(est, "_prototypes"):
+                codebook = np.asarray(est._prototypes)
+            else:
+                # Recalcul par médiane si le modèle n'expose pas les codes
+                n_nodes = xdim * ydim
+                codebook = np.array(
+                    [
+                        np.median(X[node_assignments == n], axis=0)
+                        if (node_assignments == n).sum() > 0
+                        else np.zeros(X.shape[1])
+                        for n in range(n_nodes)
+                    ]
+                )
+            return codebook, node_assignments
+
+        elif _FLOWSOM_AVAILABLE:
+            import anndata as ad
+
+            adata = ad.AnnData(X)
+            fsom = fs.FlowSOM(
+                adata,
+                cols_to_use=list(range(X.shape[1])),
+                xdim=xdim,
+                ydim=ydim,
+                n_clusters=n_metaclusters,
+                rlen=rlen,
+                seed=seed,
+            )
+            node_assignments = fsom.obs["clustering"].values.astype(int)
+            if hasattr(fsom, "codes"):
+                codebook = fsom.codes
+            else:
+                n_nodes = xdim * ydim
+                codebook = np.array(
+                    [
+                        np.median(X[node_assignments == n], axis=0)
+                        if (node_assignments == n).sum() > 0
+                        else np.zeros(X.shape[1])
+                        for n in range(n_nodes)
+                    ]
+                )
+            return codebook, node_assignments
+
+    except Exception as e:
+        _get_logger_clustering().warning(
+            "_train_som_codebook échoué (k=%d): %s", n_metaclusters, e
+        )
+
+    return None
+
+
+def _metacluster_codebook(
+    codebook: np.ndarray,
+    k: int,
+) -> np.ndarray:
+    """
+    Re-métaclustère le codebook SOM par AgglomerativeClustering.
+
+    Beaucoup plus rapide que de ré-entraîner FlowSOM complet pour chaque k.
+    Conforme au protocole ELN (raisonnement sur les nœuds, pas les cellules).
+    """
+    if not _SKLEARN_AVAILABLE:
+        raise ImportError("sklearn requis: pip install scikit-learn")
+    n_nodes = codebook.shape[0]
+    k_eff = min(k, n_nodes)
+    agg = AgglomerativeClustering(n_clusters=k_eff, linkage="ward")
+    return agg.fit_predict(codebook).astype(int)
+
+
+def phase1_silhouette_on_codebook(
+    X: np.ndarray,
+    xdim: int,
+    ydim: int,
+    rlen: int,
+    seed: int,
+    k_range: List[int],
+) -> "pd.DataFrame":
+    """
+    Phase 1 — Score silhouette sur le codebook SOM pour chaque k candidat.
+
+    L'astuce d'efficacité: on entraîne le SOM UNE SEULE FOIS avec k=max,
+    puis on ré-métaclustère avec AgglomerativeClustering pour chaque k.
+    Cela réduit le temps de O(|k_range| × T_SOM) à O(T_SOM + |k_range| × T_Agg).
+
+    Le silhouette est calculé sur les nœuds du codebook (100–400 points),
+    pas sur les cellules (10^5–10^6), ce qui est très rapide.
+
+    Args:
+        X: Matrice de données (n_cells, n_markers).
+        xdim, ydim: Dimensions de la grille SOM.
+        rlen: Itérations SOM.
+        seed: Graine aléatoire.
+        k_range: Liste des k à évaluer.
+
+    Returns:
+        DataFrame [k, silhouette_score] trié par k.
+    """
+    import pandas as pd
+
+    if not _SKLEARN_AVAILABLE:
+        raise ImportError("sklearn requis: pip install scikit-learn")
+
+    _log = _get_logger_clustering()
+    k_max = max(k_range)
+    _log.info(
+        "Phase 1: entraînement SOM (k_max=%d, grille %dx%d)...", k_max, xdim, ydim
+    )
+
+    result = _train_som_codebook(X, xdim, ydim, k_max, rlen, seed)
+    if result is None:
+        raise RuntimeError("Impossible d'entraîner le SOM — vérifier les backends.")
+
+    codebook, _ = result
+    _log.info("Phase 1: codebook SOM (%d nœuds, %d marqueurs)", *codebook.shape)
+
+    rows = []
+    for k in sorted(k_range):
+        if k < 2:
+            rows.append({"k": k, "silhouette_score": 0.0})
+            continue
+        labels = _metacluster_codebook(codebook, k)
+        n_unique = len(np.unique(labels))
+        if n_unique < 2 or n_unique >= len(codebook):
+            rows.append({"k": k, "silhouette_score": 0.0})
+            continue
+        try:
+            sil = silhouette_score(codebook, labels)
+        except Exception:
+            sil = 0.0
+        rows.append({"k": k, "silhouette_score": float(sil)})
+        _log.debug("  k=%d: silhouette=%.4f", k, sil)
+
+    df = pd.DataFrame(rows).sort_values("k").reset_index(drop=True)
+    _log.info(
+        "Phase 1 terminée. Best k=%d (sil=%.4f)",
+        df.loc[df["silhouette_score"].idxmax(), "k"],
+        df["silhouette_score"].max(),
+    )
+    return df
+
+
+def phase2_bootstrap_stability(
+    X: np.ndarray,
+    xdim: int,
+    ydim: int,
+    rlen: int,
+    seed: int,
+    candidates_k: List[int],
+    n_bootstrap: int = 5,
+    sample_size: Optional[int] = None,
+) -> Dict[int, float]:
+    """
+    Phase 2 — Stabilité bootstrap (ARI) pour les k candidats.
+
+    Pour chaque k candidat, entraîne n_bootstrap fois le SOM avec des graines
+    différentes sur un sous-ensemble de données, calcule l'ARI entre chaque
+    paire de runs. Un ARI moyen élevé = clustering stable.
+
+    Args:
+        X: Matrice (n_cells, n_markers).
+        xdim, ydim: Dimensions grille SOM.
+        rlen: Itérations SOM.
+        seed: Graine de base (chaque run = seed + i).
+        candidates_k: Liste des k à évaluer (≤5 pour rester rapide).
+        n_bootstrap: Nombre de runs par k (5 = bon compromis vitesse/précision).
+        sample_size: Taille de l'échantillon par run (None = X complet).
+
+    Returns:
+        Dict {k: mean_ari} — ARI moyen entre les n_bootstrap(n_bootstrap-1)/2 paires.
+    """
+    if not _ARI_AVAILABLE:
+        raise ImportError("sklearn requis: pip install scikit-learn")
+
+    _log = _get_logger_clustering()
+    stability_results: Dict[int, float] = {}
+    rng = np.random.default_rng(seed)
+
+    for k in candidates_k:
+        _log.info("Phase 2: stabilité bootstrap k=%d (%d runs)...", k, n_bootstrap)
+        run_labels: List[np.ndarray] = []
+
+        for i in range(n_bootstrap):
+            run_seed = seed + 1000 * (k - 1) + i  # seeds déterministes distincts
+
+            # Sous-échantillonnage optionnel pour accélérer (ELN: 20k cellules suffisent)
+            X_run = X
+            if sample_size is not None and sample_size < X.shape[0]:
+                idx = rng.choice(X.shape[0], size=sample_size, replace=False)
+                X_run = X[idx]
+
+            result = _train_som_codebook(X_run, xdim, ydim, k, rlen, run_seed)
+            if result is None:
+                _log.warning("  Run %d/k=%d: SOM échoué, ignoré.", i, k)
+                continue
+
+            _, node_assignments = result
+            # Convertir node_assignments → label par métacluster
+            codebook_tmp, _ = result
+            meta_labels = _metacluster_codebook(codebook_tmp, k)
+            cell_meta_labels = meta_labels[node_assignments]
+            run_labels.append(cell_meta_labels)
+
+        # ARI pairwise entre tous les runs
+        ari_scores = []
+        for a in range(len(run_labels)):
+            for b in range(a + 1, len(run_labels)):
+                n_min = min(len(run_labels[a]), len(run_labels[b]))
+                ari = _ari_score(run_labels[a][:n_min], run_labels[b][:n_min])
+                ari_scores.append(ari)
+
+        mean_ari = float(np.mean(ari_scores)) if ari_scores else 0.0
+        stability_results[k] = mean_ari
+        _log.info("  k=%d: ARI moyen=%.4f sur %d paires", k, mean_ari, len(ari_scores))
+
+    return stability_results
+
+
+def phase3_composite_selection(
+    sil_df: "pd.DataFrame",
+    stability_results: Dict[int, float],
+    w_stability: float = 0.6,
+    w_silhouette: float = 0.4,
+    min_stability: float = 0.7,
+) -> Tuple[int, "pd.DataFrame"]:
+    """
+    Phase 3 — Score composite stabilité + silhouette pour choisir le k final.
+
+    Score = w_stability × ARI_normalisé + w_silhouette × Sil_normalisé
+    Pénalité 0.7× sur les k dont la stabilité < min_stability.
+
+    Args:
+        sil_df: Résultat phase 1 — DataFrame [k, silhouette_score].
+        stability_results: Résultat phase 2 — dict {k: mean_ari}.
+        w_stability: Poids de la stabilité (default 0.6).
+        w_silhouette: Poids de la silhouette (default 0.4).
+        min_stability: Seuil minimal de stabilité pour éviter la pénalité.
+
+    Returns:
+        Tuple (best_k, scores_df) où scores_df = [k, sil, ari, composite_score].
+    """
+    import pandas as pd
+
+    _log = _get_logger_clustering()
+
+    # Aligner sur les k communs entre phase 1 et phase 2
+    k_common = [k for k in stability_results if k in sil_df["k"].values]
+    if not k_common:
+        # Fallback: juste phase 1
+        best_k = int(sil_df.loc[sil_df["silhouette_score"].idxmax(), "k"])
+        _log.warning(
+            "Phase 3: aucun k commun phase1/phase2 — fallback silhouette k=%d", best_k
+        )
+        return best_k, sil_df
+
+    sil_map = dict(zip(sil_df["k"], sil_df["silhouette_score"]))
+
+    ari_vals = np.array([stability_results[k] for k in k_common])
+    sil_vals = np.array([sil_map[k] for k in k_common])
+
+    # Normalisation min-max (robuste aux plages différentes)
+    def _norm(arr: np.ndarray) -> np.ndarray:
+        rng_ = arr.max() - arr.min()
+        return (arr - arr.min()) / max(rng_, 1e-9)
+
+    ari_norm = _norm(ari_vals)
+    sil_norm = _norm(sil_vals)
+
+    composite = w_stability * ari_norm + w_silhouette * sil_norm
+
+    # Pénaliser les k instables
+    for i, k in enumerate(k_common):
+        if stability_results[k] < min_stability:
+            composite[i] *= 0.7
+            _log.debug(
+                "  k=%d: pénalisé (ARI=%.3f < %.2f)",
+                k,
+                stability_results[k],
+                min_stability,
+            )
+
+    best_idx = int(np.argmax(composite))
+    best_k = k_common[best_idx]
+
+    scores_df = (
+        pd.DataFrame(
+            {
+                "k": k_common,
+                "silhouette_score": sil_vals,
+                "ari_stability": ari_vals,
+                "composite_score": composite,
+            }
+        )
+        .sort_values("k")
+        .reset_index(drop=True)
+    )
+
+    _log.info(
+        "Phase 3 terminée. Best k=%d — sil=%.4f, ARI=%.4f, composite=%.4f",
+        best_k,
+        sil_map[best_k],
+        stability_results[best_k],
+        float(composite[best_idx]),
+    )
+    return best_k, scores_df
+
+
+def find_optimal_clusters_stability(
+    X: np.ndarray,
+    seed: int = 42,
+    xdim: int = 10,
+    ydim: int = 10,
+    rlen: Any = "auto",
+    k_range: Optional[List[int]] = None,
+    n_bootstrap: int = 5,
+    bootstrap_sample_size: Optional[int] = 20000,
+    top_n_phase2: int = 3,
+    w_stability: float = 0.6,
+    w_silhouette: float = 0.4,
+    min_stability: float = 0.7,
+) -> Tuple[int, int, int, int]:
+    """
+    Optimisation en 3 phases du nombre optimal de métaclusters FlowSOM.
+
+    Phase 1 (rapide) : Silhouette sur codebook SOM — sélectionne les top k.
+    Phase 2 (coûteux) : Bootstrap ARI sur les `top_n_phase2` candidats.
+    Phase 3 (rapide) : Score composite stabilité+silhouette pour le choix final.
+
+    Protocole conforme ELN 2022: le SOM est entraîné sur l'ensemble, le
+    silhouette est calculé sur les nœuds (pas les cellules) pour la robustesse.
+
+    Args:
+        X: Matrice (n_cells, n_markers) transformée+normalisée (sans NaN/Inf).
+        seed: Graine aléatoire (tous les runs utilisent seed+offset).
+        xdim, ydim: Dimensions de la grille SOM.
+        rlen: Itérations SOM ("auto" ou entier).
+        k_range: Liste des k à évaluer (default: 4..15).
+        n_bootstrap: Runs bootstrap par k candidat en phase 2.
+        bootstrap_sample_size: Cellules par run bootstrap (None = tout).
+        top_n_phase2: Nombre de k candidats passés en phase 2.
+        w_stability, w_silhouette: Poids du score composite (somme ≈ 1.0).
+        min_stability: ARI minimal sous lequel le k subit une pénalité ×0.7.
+
+    Returns:
+        Tuple (best_k, rlen_final, xdim_final, ydim_final).
+    """
+    _log = _get_logger_clustering()
+
+    if k_range is None:
+        k_range = list(range(4, 16))  # défaut biologique pour la moelle osseuse
+
+    n_cells = X.shape[0]
+    rlen_final = compute_optimal_rlen(n_cells, rlen)
+    xdim_final, ydim_final = compute_optimal_grid(n_cells, xdim, ydim)
+
+    _log.info(
+        "Optimisation clusters: %d cellules, grille %dx%d, rlen=%d, k_range=%s",
+        n_cells,
+        xdim_final,
+        ydim_final,
+        rlen_final,
+        k_range,
+    )
+
+    # ── Phase 1: silhouette rapide sur codebook ───────────────────────────────
+    sil_df = phase1_silhouette_on_codebook(
+        X,
+        xdim=xdim_final,
+        ydim=ydim_final,
+        rlen=rlen_final,
+        seed=seed,
+        k_range=k_range,
+    )
+
+    # Top k_range candidats pour la phase 2 (coûteuse)
+    candidates_k = sil_df.nlargest(top_n_phase2, "silhouette_score")["k"].tolist()
+    _log.info("Phase 2 candidats: %s", candidates_k)
+
+    # ── Phase 2: bootstrap ARI sur les top candidats ─────────────────────────
+    stability_results = phase2_bootstrap_stability(
+        X,
+        xdim=xdim_final,
+        ydim=ydim_final,
+        rlen=rlen_final,
+        seed=seed,
+        candidates_k=candidates_k,
+        n_bootstrap=n_bootstrap,
+        sample_size=bootstrap_sample_size,
+    )
+
+    # ── Phase 3: score composite pour le choix final ─────────────────────────
+    best_k, scores_df = phase3_composite_selection(
+        sil_df=sil_df,
+        stability_results=stability_results,
+        w_stability=w_stability,
+        w_silhouette=w_silhouette,
+        min_stability=min_stability,
+    )
+
+    _log.info(
+        "Optimisation terminée: best_k=%d, grille=%dx%d, rlen=%d",
+        best_k,
+        xdim_final,
+        ydim_final,
+        rlen_final,
+    )
+    return best_k, rlen_final, xdim_final, ydim_final

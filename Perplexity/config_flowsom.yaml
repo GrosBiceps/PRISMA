@@ -1,0 +1,133 @@
+# ============================================================================
+# Configuration FlowSOM Pipeline — Complète
+# ============================================================================
+# Toutes les sections sont lues automatiquement au démarrage du script.
+# Priorité : arguments CLI > ce fichier > valeurs par défaut du code
+#
+# Utilisation directe: python flowsom_pipeline.py
+# Avec config explicite: python flowsom_pipeline.py --config config_flowsom.yaml
+
+# ----------------------------------------------------------------------------
+# Chemins
+# ----------------------------------------------------------------------------
+paths:
+  healthy_folder: "C:/Users/Florian Travail/Documents/FlowSom/Data/Moelle normale"
+  patho_folder: "C:/Users/Florian Travail/Documents/FlowSom/Data/Patho"
+  output_dir: "C:/Users/Florian Travail/Documents/FlowSom/Perplexity/Results"
+
+# ----------------------------------------------------------------------------
+# Mode d'analyse
+# ----------------------------------------------------------------------------
+analysis:
+  compare_mode: true          # true = comparer Sain vs Pathologique
+
+# ----------------------------------------------------------------------------
+# Pre-gating général
+# ----------------------------------------------------------------------------
+pregate:
+  apply: true                 # Appliquer le pre-gating séquentiel
+  mode: "auto"                # "auto" (GMM adaptatif) | "manual" (percentiles fixes)
+  mode_blastes_vs_normal: true  # true = gating asymétrique CD45 patho seulement
+  viable: true                # Gate 1 : exclusion débris (SSC-A vs FSC-A)
+  singlets: true              # Gate 2 : exclusion doublets (FSC-H vs FSC-A)
+  cd45: true                  # Gate 3 : sélection leucocytes CD45+
+  cd34: false                 # Gate 4 : sélection blastes CD34+ (optionnel)
+
+# ----------------------------------------------------------------------------
+# Pre-gating avancé (seuils fins — utilisés si mode: "manual")
+# ----------------------------------------------------------------------------
+pregate_advanced:
+  # Gate 1 Débris
+  debris_min_percentile: 1.0    # % lower pour exclure débris (FSC/SSC)
+  debris_max_percentile: 99.0   # % upper pour exclure débris
+
+  # Gate 2 Doublets (RANSAC ratio FSC-H / FSC-A)
+  doublets_ratio_min: 0.6       # Ratio min FSC-H/FSC-A pour singlet
+  doublets_ratio_max: 1.4       # Ratio max FSC-H/FSC-A pour singlet
+
+  # Gate 3 CD45+
+  cd45_threshold_percentile: 5  # Percentile de coupure CD45 (bas = inclure plus)
+
+  # Gate 4 CD34+ (blastes)
+  cd34_threshold_percentile: 85 # Percentile de coupure CD34 (haut = blastes purs)
+  cd34_use_ssc_filter: true     # Utiliser SSC-A low en plus de CD34+ pour blastes
+  cd34_ssc_max_percentile: 60   # SSC-A percentile max pour blastes (bas SSC)
+
+# ----------------------------------------------------------------------------
+# Paramètres FlowSOM
+# ----------------------------------------------------------------------------
+flowsom:
+  xdim: 10              # Dimension X de la grille SOM
+  ydim: 10              # Dimension Y de la grille SOM
+  rlen: "auto"          # Itérations SOM : "auto" (√N×0.1, borné 10–100) ou entier
+  n_metaclusters: 8    # Nombre de métaclusters (utilisé si auto_clustering.enabled: false)
+  learning_rate: 0.05   # Taux d'apprentissage SOM
+  sigma: 1.5            # Sigma voisinage SOM
+  n_iterations: 10      # Itérations run_flowsom_pipeline (pipeline CLI seulement)
+  seed: 42              # Graine aléatoire pour reproductibilité
+
+# ----------------------------------------------------------------------------
+# Auto-clustering (Stabilité AMJI/ARI + Silhouette) — Recommandé pour MRD
+# Littérature 2024 : stabilité > score unique
+# ----------------------------------------------------------------------------
+auto_clustering:
+  enabled: false                  # true = chercher k optimal automatiquement
+  min_clusters: 5                 # k minimum à tester
+  max_clusters: 35                # k maximum à tester
+  n_bootstrap: 10                 # Nombre de runs bootstrap par k
+  sample_size_bootstrap: 20000    # Cellules pour chaque run bootstrap
+  min_stability_threshold: 0.75   # Score stabilité minimum acceptable
+  weight_stability: 0.65          # Poids de la stabilité dans le score composite
+  weight_silhouette: 0.35         # Poids du silhouette dans le score composite
+
+# ----------------------------------------------------------------------------
+# Transformation cytométrique
+# ----------------------------------------------------------------------------
+transform:
+  method: "logicle"     # arcsinh | logicle | log10 | none
+  cofactor: 5           # Cofacteur arcsinh (5 = standard flow, 150 = mass cyt)
+  apply_to_scatter: false  # Appliquer aussi aux canaux FSC/SSC/Time
+
+# ----------------------------------------------------------------------------
+# Normalisation
+# ----------------------------------------------------------------------------
+normalize:
+  method: "zscore"      # zscore | minmax | none
+
+# ----------------------------------------------------------------------------
+# Sélection des marqueurs pour FlowSOM
+# ----------------------------------------------------------------------------
+markers:
+  exclude_scatter: true               # Exclure FSC/SSC/Time du clustering
+  exclude_additional: ["CD45"]        # Marqueurs supplémentaires à exclure (liste)
+
+# ----------------------------------------------------------------------------
+# Downsampling
+# ----------------------------------------------------------------------------
+downsampling:
+  enabled: true
+  max_cells_per_file: 50000     # Max cellules par fichier FCS
+  max_cells_total: 1000000      # Max cellules total (tous fichiers combinés)
+
+# ----------------------------------------------------------------------------
+# Visualisation
+# ----------------------------------------------------------------------------
+visualization:
+  save_plots: true
+  plot_format: "png"    # png | pdf | svg
+  dpi: 300
+
+# ----------------------------------------------------------------------------
+# GPU — Accélération CUDA via FlowSomGpu (module local)
+# Prérequis : CUDA installé + CuPy compatible + module FlowSomGpu présent dans
+#             C:/Users/Florian Travail/Documents/FlowSom/FlowSomGpu/
+# Si GPU non disponible, le pipeline bascule automatiquement sur CPU sans erreur
+# ----------------------------------------------------------------------------
+gpu:
+  enabled: true         # true = activer GPUFlowSOMEstimator si CUDA disponible
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+logging:
+  level: "INFO"         # DEBUG | INFO | WARNING | ERROR

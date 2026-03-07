@@ -1,0 +1,79 @@
+# default_config.yaml — Configuration par défaut du pipeline FlowSOM Pro
+# Toutes les valeurs peuvent être surchargées par un fichier YAML utilisateur.
+# Voir config/constants.py pour les seuils cliniques ELN — NE PAS MODIFIER ICI.
+
+paths:
+  healthy_folder: "Data/Moelle normale"
+  patho_folder: "Data/Patho"
+  output_dir: "Results"
+
+analysis:
+  compare_mode: true
+
+pregate:
+  apply: true
+  mode: "auto"              # auto (GMM) | manual (percentiles)
+  mode_blastes_vs_normal: true
+  viable: true
+  singlets: true
+  cd45: false
+  cd34: false
+
+pregate_advanced:
+  debris_min_percentile: 1.0
+  debris_max_percentile: 99.0
+  doublets_ratio_min: 0.6
+  doublets_ratio_max: 1.4
+  cd45_threshold_percentile: 5.0
+  cd34_threshold_percentile: 85.0
+  cd34_use_ssc_filter: true
+  cd34_ssc_max_percentile: 60.0
+
+flowsom:
+  xdim: 10
+  ydim: 10
+  rlen: "auto"
+  n_metaclusters: 8
+  learning_rate: 0.05
+  sigma: 1.5
+  n_iterations: 10
+  seed: 42
+
+auto_clustering:
+  enabled: false
+  min_clusters: 5
+  max_clusters: 35
+  n_bootstrap: 10
+  sample_size_bootstrap: 20000
+  min_stability_threshold: 0.75
+  weight_stability: 0.65
+  weight_silhouette: 0.35
+
+transform:
+  method: "logicle"   # arcsinh | logicle | log10 | none
+  cofactor: 5.0
+  apply_to_scatter: false
+
+normalize:
+  method: "zscore"    # zscore | minmax | none
+
+markers:
+  exclude_scatter: true
+  exclude_additional: []
+  keep_area_only: true    # Supprime les doublons -H (Height) ; garde -A (Area) + FSC/SSC/Time
+
+downsampling:
+  enabled: false
+  max_cells_per_file: 50000
+  max_cells_total: 1000000
+
+visualization:
+  save_plots: true
+  plot_format: "png"
+  dpi: 300
+
+gpu:
+  enabled: true
+
+logging:
+  level: "INFO"
