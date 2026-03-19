@@ -37,17 +37,24 @@ try:
     import sys
     import os
 
-    # Chemin dynamique : FlowSomGpu se trouve 2 niveaux au-dessus de flowsom_pipeline_pro
-    # clustering.py → src/core → src → flowsom_pipeline_pro → Perplexity → FlowSom
-    _gpu_path = str(Path(__file__).parent.parent.parent.parent.parent)
+    # Priorité 1 : variable d'environnement FLOWSOM_GPU_PATH (portable)
+    # Priorité 2 : chemin relatif au package (5 niveaux au-dessus de clustering.py)
+    _gpu_path = os.environ.get("FLOWSOM_GPU_PATH") or str(
+        Path(__file__).parent.parent.parent.parent.parent
+    )
     if _gpu_path not in sys.path:
         sys.path.insert(0, _gpu_path)
     from FlowSomGpu.models import GPUFlowSOMEstimator
 
     _GPU_AVAILABLE = True
-except Exception:
+except ImportError as _gpu_import_err:
     _GPU_AVAILABLE = False
     GPUFlowSOMEstimator = None
+    _logger.debug("GPUFlowSOMEstimator non disponible (ImportError): %s", _gpu_import_err)
+except Exception as _gpu_err:
+    _GPU_AVAILABLE = False
+    GPUFlowSOMEstimator = None
+    _logger.warning("GPUFlowSOMEstimator import échoué: %s", _gpu_err)
 
 
 def compute_optimal_rlen(n_cells: int, rlen_setting: Any = "auto") -> int:
@@ -91,7 +98,7 @@ def compute_optimal_grid(
     Returns:
         Tuple (xdim_final, ydim_final).
     """
-    if n_cells < 50_000 and xdim == 10 and ydim == 10:
+    if n_cells < 50_000 and xdim * ydim > 49:
         return 7, 7
     return xdim, ydim
 

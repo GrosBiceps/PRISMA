@@ -988,6 +988,8 @@ def plot_cd45_kde_qc(
     ax: Optional[Any] = None,
     title: Optional[str] = None,
     output_path: Optional[Path] = None,
+    conditions: Optional[np.ndarray] = None,
+    condition_patho: str = "Pathologique",
 ) -> Tuple[Any, Any, float, Optional[float]]:
     """
     Trace la densité KDE de CD45 avec le seuil GMM et la vallée KDE.
@@ -995,16 +997,19 @@ def plot_cd45_kde_qc(
     Interface identique à plot_gmm_vs_kde_qc mais adaptée au marqueur CD45.
     Le seuil GMM est dérivé du masque : max CD45 parmi les exclus (CD45−).
     Si tout est True (pas de CD45−), un GMM interne 2-composantes est ajusté.
-     plot_cd45_kde_qc(
+
     Args:
         cd45_data: Vecteur CD45 brut (n_events,).
         mask_cd45: Masque booléen Gate G3 (True = CD45+).
         n_subsample: Points pour estimer la KDE.
-          conditions=conditions,
         random_seed: Reproductibilité.
         ax: Axes matplotlib existants (optionnel).
         title: Titre du graphique (auto-généré si None).
         output_path: Chemin de sauvegarde PNG (optionnel).
+        conditions: Tableau de conditions par cellule (ex. "Pathologique" / "Sain").
+                    Si fourni, un encadré supplémentaire affiche les comptages
+                    CD45+/CD45− restreints à la moelle pathologique.
+        condition_patho: Valeur de la condition pathologique (défaut: "Pathologique").
 
     Returns:
         Tuple (fig, ax, gmm_threshold, kde_valley).
@@ -1209,6 +1214,39 @@ def plot_cd45_kde_qc(
     ax.legend(
         loc="upper left", fontsize=9, facecolor=BG, edgecolor=GRID, labelcolor=TXT
     )
+
+    # ── Encadré : CD45+/CD45− dans la moelle pathologique ─────────────────────
+    if conditions is not None:
+        cond_arr = np.asarray(conditions).ravel()
+        if len(cond_arr) == len(mask_cd45):
+            patho_mask = cond_arr == condition_patho
+            n_patho_total = int(patho_mask.sum())
+            if n_patho_total > 0:
+                n_patho_pos = int((patho_mask & mask_cd45).sum())
+                n_patho_neg = int((patho_mask & ~mask_cd45).sum())
+                pct_pos = 100.0 * n_patho_pos / n_patho_total
+                pct_neg = 100.0 * n_patho_neg / n_patho_total
+                patho_text = (
+                    "─ Moelle pathologique ─\n"
+                    f"CD45+  : {n_patho_pos:,} ({pct_pos:.1f}%)\n"
+                    f"CD45−  : {n_patho_neg:,} ({pct_neg:.1f}%)\n"
+                    f"Total  : {n_patho_total:,}"
+                )
+                ax.text(
+                    0.98, 0.60,
+                    patho_text,
+                    transform=ax.transAxes,
+                    ha="right", va="top",
+                    fontsize=8.5, color=TXT, family="monospace",
+                    bbox=dict(
+                        facecolor=BG,
+                        edgecolor="#f38ba8",   # bordure rouge doux (≠ encadré stats)
+                        linewidth=1.4,
+                        alpha=0.90,
+                        pad=6,
+                    ),
+                )
+
     plt.tight_layout()
 
     if output_path is not None:

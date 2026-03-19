@@ -114,21 +114,8 @@ def preprocess_sample(
             "%s: filtrage -A uniquement → %d marqueurs", file_name, len(var_names)
         )
 
-    # ── 4. Transformation cytométrique ────────────────────────────────────────
-    transform_cfg = config.transform
-    if transform_cfg.method != "none":
-        X = DataTransformer.apply(
-            X,
-            method=transform_cfg.method,
-            cofactor=transform_cfg.cofactor,
-            var_names=var_names,
-            apply_to_scatter=transform_cfg.apply_to_scatter,
-        )
-
-    # ── 5. Normalisation ─────────────────────────────────────────────────────
-    normalize_cfg = config.normalize
-    if normalize_cfg.method != "none":
-        X = DataNormalizer.apply(X, method=normalize_cfg.method)
+    # ── 4+5. Transformation cytométrique + Normalisation ──────────────────────
+    X = _apply_transforms(X, var_names, config)
 
     # ── Reconstruire le FlowSample avec les données traitées ─────────────────
     import pandas as _pd
@@ -153,6 +140,27 @@ def preprocess_sample(
         X.shape[0],
     )
     return processed
+
+
+def _apply_transforms(
+    X: np.ndarray,
+    var_names: List[str],
+    config: "PipelineConfig",
+) -> np.ndarray:
+    """Applique la transformation cytométrique et la normalisation sur X."""
+    transform_cfg = config.transform
+    if transform_cfg.method != "none":
+        X = DataTransformer.apply(
+            X,
+            method=transform_cfg.method,
+            cofactor=transform_cfg.cofactor,
+            var_names=var_names,
+            apply_to_scatter=transform_cfg.apply_to_scatter,
+        )
+    normalize_cfg = config.normalize
+    if normalize_cfg.method != "none":
+        X = DataNormalizer.apply(X, method=normalize_cfg.method)
+    return X
 
 
 def _filter_area_markers(
@@ -245,10 +253,6 @@ def _apply_gating(
     # Gate 1 – Débris
     if getattr(pregate_cfg, "viable", True):
         if mode == "auto":
-            # Appliquer le sous-échantillonnage GMM configuré (pregate_advanced.gmm_max_samples)
-            AutoGating.GMM_MAX_SAMPLES = getattr(
-                pregate_cfg, "gmm_max_samples", AutoGating.GMM_MAX_SAMPLES
-            )
             mask = AutoGating.auto_gate_debris(X, var_names)
         else:
             mask = PreGating.gate_viable_cells(
@@ -611,21 +615,8 @@ def preprocess_combined(
     X_pre_transform = X_raw.copy()
     var_names_pre_transform: List[str] = list(var_names)
 
-    # ── 5. Transformation cytométrique ───────────────────────────────────────
-    transform_cfg = config.transform
-    if transform_cfg.method != "none":
-        X_raw = DataTransformer.apply(
-            X_raw,
-            method=transform_cfg.method,
-            cofactor=transform_cfg.cofactor,
-            var_names=var_names,
-            apply_to_scatter=transform_cfg.apply_to_scatter,
-        )
-
-    # ── 6. Normalisation ─────────────────────────────────────────────────────
-    normalize_cfg = config.normalize
-    if normalize_cfg.method != "none":
-        X_raw = DataNormalizer.apply(X_raw, method=normalize_cfg.method)
+    # ── 5+6. Transformation cytométrique + Normalisation ──────────────────────
+    X_raw = _apply_transforms(X_raw, var_names, config)
 
     # ── 7. Split par fichier — AUCUN sous-échantillonnage avant FlowSOM ────────
     # Identique au monolithe flowsom_pipeline.py : FlowSOM s'entraîne sur
@@ -731,9 +722,6 @@ def _apply_gating_combined(
     if getattr(pregate_cfg, "viable", True):
         _logger.info("Gate 1 — Débris [%s] sur %d cellules combinées", mode, n_before)
         if mode == "auto":
-            AutoGating.GMM_MAX_SAMPLES = getattr(
-                pregate_cfg, "gmm_max_samples", AutoGating.GMM_MAX_SAMPLES
-            )
             mask_debris = AutoGating.auto_gate_debris(X, var_names)
         else:
             mask_debris = PreGating.gate_viable_cells(

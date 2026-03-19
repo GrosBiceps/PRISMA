@@ -20,10 +20,14 @@ Chaque méthode:
 
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+_logger = logging.getLogger("core.auto_gating")
+_rng = np.random.default_rng(seed=42)
 
 from ..models.gate_result import (
     GateResult,
@@ -75,13 +79,6 @@ class AutoGating:
     Dépendances: scikit-learn (GaussianMixture, StandardScaler)
     """
 
-    # Seuil R² minimal pour la régression RANSAC (en dessous → fallback ratio)
-    RANSAC_R2_THRESHOLD = 0.85
-    # Facteur MAD pour le seuil de résidus ("médiane + N * MAD")
-    RANSAC_MAD_FACTOR = 3.0
-    # Sous-échantillonnage max avant GMM (convergence + performance)
-    GMM_MAX_SAMPLES = 200_000
-
     @staticmethod
     def _subsample_for_gmm(data: np.ndarray, max_samples: int = None) -> np.ndarray:
         """
@@ -96,11 +93,13 @@ class AutoGating:
             data_subsampled: Données sous-échantillonnées (ou originales si < max)
         """
         if max_samples is None:
-            max_samples = AutoGating.GMM_MAX_SAMPLES
+            max_samples = GMM_MAX_SAMPLES
         if data.shape[0] > max_samples:
-            idx = np.random.choice(data.shape[0], size=max_samples, replace=False)
-            print(
-                f"      [GMM] Sous-echantillonnage: {data.shape[0]:,} -> {max_samples:,} points"
+            idx = _rng.choice(data.shape[0], size=max_samples, replace=False)
+            _logger.debug(
+                "[GMM] Sous-échantillonnage: %d -> %d points",
+                data.shape[0],
+                max_samples,
             )
             return data[idx]
         return data
@@ -246,7 +245,7 @@ class AutoGating:
         ssc_idx = PreGating.find_marker_index(var_names, ["SSC-A"])
 
         if fsc_idx is None or ssc_idx is None:
-            print("[!] FSC-A ou SSC-A non trouvé pour auto-gate débris")
+            _logger.warning("[!] FSC-A ou SSC-A non trouvé pour auto-gate débris")
             log_gating_event(
                 "debris", "auto_gmm", "error", warning_msg="FSC-A ou SSC-A non trouvé"
             )
@@ -260,7 +259,7 @@ class AutoGating:
         data_2d = np.column_stack([fsc[valid], ssc[valid]])
 
         if valid.sum() < 200:
-            print("[!] Pas assez de données valides pour auto-gate débris")
+            _logger.warning("[!] Pas assez de données valides pour auto-gate débris")
             return np.ones(n_cells, dtype=bool)
 
         # Standardiser avant GMM pour meilleure convergence
@@ -281,18 +280,18 @@ class AutoGating:
                 )
                 bic = gmm_test.bic(
                     data_scaled
-                    if data_scaled.shape[0] <= AutoGating.GMM_MAX_SAMPLES
+                    if data_scaled.shape[0] <= GMM_MAX_SAMPLES
                     else AutoGating._subsample_for_gmm(data_scaled)
                 )
                 if bic < best_bic:
                     best_bic = bic
                     best_gmm = gmm_test
             except RuntimeError as e:
-                print(f"   [!] GMM {n_comp} composantes échoué: {e}")
+                _logger.warning("[!] GMM %d composantes échoué: %s", n_comp, e)
                 continue
 
         if best_gmm is None:
-            print("   [!] Aucun GMM n'a convergé, conservation de tous les événements")
+            _logger.warning("[!] Aucun GMM n'a convergé, conservation de tous les événements")
             log_gating_event(
                 "debris",
                 "auto_gmm",
@@ -334,15 +333,21 @@ class AutoGating:
         mask[valid] = mask_valid
 
         n_kept = mask.sum()
-        print(
-            f"   [Auto-GMM] {best_gmm.n_components} composantes détectées (BIC={best_bic:.0f})"
+        _logger.info(
+            "   [Auto-GMM] %d composantes détectées (BIC=%.0f)",
+            best_gmm.n_components,
+            best_bic,
         )
         for i in range(n_comp):
             status = "[OK]" if mask_valid[labels == i].any() else "[--]"
-            print(
-                f"     {status} Cluster {i}: {cluster_sizes[i]:,} evt, FSC-A moy={cluster_fsc_means[i]:.0f}"
+            _logger.info(
+                "     %s Cluster %d: %d evt, FSC-A moy=%.0f",
+                status,
+                i,
+                cluster_sizes[i],
+                cluster_fsc_means[i],
             )
-        print(f"   [Auto-GMM] Conserves: {n_kept:,} evenements")
+        _logger.info("   [Auto-GMM] Conservés: %d événements", n_kept)
 
         # Log structuré
         log_gating_event(
@@ -416,7 +421,7 @@ class AutoGating:
         fsc_h_idx = PreGating.find_marker_index(var_names, ["FSC-H"])
 
         if fsc_a_idx is None or fsc_h_idx is None:
-            print("[!] FSC-A ou FSC-H non trouvé pour auto-gate singlets")
+            _logger.warning("[!] FSC-A ou FSC-H non trouvé pour auto-gate singlets")
             return np.ones(n_cells, dtype=bool)
 
         fsc_a = X[:, fsc_a_idx].astype(np.float64)
@@ -438,7 +443,7 @@ class AutoGating:
         )
 
         if valid.sum() < 200:
-            print("[!] Pas assez de données valides pour auto-gate singlets")
+            _logger.warning("[!] Pas assez de données valides pour auto-gate singlets")
             return np.ones(n_cells, dtype=bool)
 
         mask = np.zeros(n_cells, dtype=bool)
@@ -454,7 +459,7 @@ class AutoGating:
         # Gating par fichier si demandé et si file_origin fourni
         if per_file and file_origin is not None:
             unique_files = np.unique(file_origin)
-            print(f"   [Auto-RANSAC] Gating par fichier ({len(unique_files)} fichiers)")
+            _logger.info("   [Auto-RANSAC] Gating par fichier (%d fichiers)", len(unique_files))
 
             total_singlets = 0
             total_doublets = 0
@@ -506,7 +511,7 @@ class AutoGating:
                         if r2_val < r2_threshold:
                             # ─── FALLBACK: gating ratio simple ───
                             warn_msg = f"R² faible pour {file_name} (R²={r2_val:.2f} < {r2_threshold}), fallback gating ratio"
-                            print(f"      [!] {warn_msg}")
+                            _logger.warning("      [!] %s", warn_msg)
                             log_gating_event(
                                 "singlets",
                                 "ransac_fallback_ratio",
@@ -534,8 +539,13 @@ class AutoGating:
                                 if len(file_name) <= 25
                                 else file_name[:22] + "..."
                             )
-                            print(
-                                f"      • {file_short}: {n_sing:,} singlets / {n_sing + n_doub:,} ({n_sing / (n_sing + n_doub) * 100:.1f}%) - RATIO FALLBACK (R²={r2_val:.2f})"
+                            _logger.info(
+                                "      • %s: %d singlets / %d (%.1f%%) - RATIO FALLBACK (R²=%.2f)",
+                                file_short,
+                                n_sing,
+                                n_sing + n_doub,
+                                n_sing / (n_sing + n_doub) * 100,
+                                r2_val,
                             )
 
                             # Stocker les scatter data (même si fallback, pour diagnostic)
@@ -599,13 +609,20 @@ class AutoGating:
                         file_name if len(file_name) <= 25 else file_name[:22] + "..."
                     )
                     r2_str = f", R²={r2_val:.3f}" if r2_val is not None else ""
-                    print(
-                        f"      • {file_short}: {n_sing:,} singlets / {n_sing + n_doub:,} ({n_sing / (n_sing + n_doub) * 100:.1f}%) - y={slope:.3f}x+{intercept:.0f}{r2_str}"
+                    _logger.info(
+                        "      • %s: %d singlets / %d (%.1f%%) - y=%.3fx+%.0f%s",
+                        file_short,
+                        n_sing,
+                        n_sing + n_doub,
+                        n_sing / (n_sing + n_doub) * 100,
+                        slope,
+                        intercept,
+                        r2_str,
                     )
 
                     # Stocker scatter data pour le rapport HTML (échantillonné)
                     n_sample_pts = min(2000, len(fsc_a_file))
-                    sample_idx = np.random.choice(
+                    sample_idx = _rng.choice(
                         len(fsc_a_file), n_sample_pts, replace=False
                     )
                     ransac_scatter_data[str(file_name)] = {
@@ -646,7 +663,7 @@ class AutoGating:
                     )
 
                 except Exception as e:
-                    print(f"      [!] Échec RANSAC pour {file_name}: {e}")
+                    _logger.warning("      [!] Échec RANSAC pour %s: %s", file_name, e)
                     log_gating_event(
                         "singlets",
                         "ransac",
@@ -668,16 +685,16 @@ class AutoGating:
                         }
                     )
 
-            print(
-                f"   [Auto-RANSAC] Total: {total_singlets:,} singlets, {total_doublets:,} doublets exclus"
+            _logger.info(
+                "   [Auto-RANSAC] Total: %d singlets, %d doublets exclus",
+                total_singlets,
+                total_doublets,
             )
 
             # Résumé tableau % singlets par fichier
             if singlets_summary_per_file:
-                print(
-                    f"\n   {'Fichier':<30} {'Méthode':<18} {'R²':>6} {'% Singlets':>12}"
-                )
-                print(f"   {'-' * 30} {'-' * 18} {'-' * 6} {'-' * 12}")
+                header = f"\n   {'Fichier':<30} {'Méthode':<18} {'R²':>6} {'% Singlets':>12}"
+                _logger.info(header)
                 for row in singlets_summary_per_file:
                     r2_disp = f"{row['r2']:.3f}" if row["r2"] is not None else "N/A"
                     fname_short = (
@@ -685,13 +702,17 @@ class AutoGating:
                         if len(row["file"]) <= 30
                         else row["file"][:27] + "..."
                     )
-                    print(
-                        f"   {fname_short:<30} {row['method']:<18} {r2_disp:>6} {row['pct_singlets']:>10.1f}%"
+                    _logger.info(
+                        "   %-30s %-18s %6s %10.1f%%",
+                        fname_short,
+                        row["method"],
+                        r2_disp,
+                        row["pct_singlets"],
                     )
 
         else:
             # Gating global (ancien comportement)
-            print(f"   [Auto-RANSAC] Gating global sur toutes les données")
+            _logger.info("   [Auto-RANSAC] Gating global sur toutes les données")
 
             fsc_a_valid = fsc_a[valid].reshape(-1, 1)
             fsc_h_valid = fsc_h[valid].reshape(-1, 1)
@@ -716,7 +737,7 @@ class AutoGating:
                 )
                 if r2_val < r2_threshold:
                     warn_msg = f"R² faible global (R²={r2_val:.2f} < {r2_threshold}), fallback gating ratio"
-                    print(f"   [!] {warn_msg}")
+                    _logger.warning("   [!] %s", warn_msg)
                     log_gating_event(
                         "singlets",
                         "ransac_fallback_ratio",
@@ -730,8 +751,10 @@ class AutoGating:
 
                     n_singlets = mask.sum()
                     n_doublets = valid.sum() - n_singlets
-                    print(
-                        f"   [RATIO FALLBACK] Singlets: {n_singlets:,} ({n_singlets / valid.sum() * 100:.1f}%)"
+                    _logger.info(
+                        "   [RATIO FALLBACK] Singlets: %d (%.1f%%)",
+                        n_singlets,
+                        n_singlets / valid.sum() * 100,
                     )
 
                     gate_result = GateResult(
@@ -765,17 +788,23 @@ class AutoGating:
             intercept = ransac.estimator_.intercept_
 
             r2_str = f", R²={r2_val:.3f}" if r2_val is not None else ""
-            print(
-                f"   [Auto-RANSAC] Droite: y = {slope:.3f}x + {intercept:.0f}{r2_str}"
+            _logger.info(
+                "   [Auto-RANSAC] Droite: y = %.3fx + %.0f%s", slope, intercept, r2_str
             )
-            print(
-                f"   [Auto-RANSAC] Seuil MAD: médiane + {mad_factor:.1f}×MAD = {threshold_upper:.0f}"
+            _logger.info(
+                "   [Auto-RANSAC] Seuil MAD: médiane + %.1f×MAD = %.0f",
+                mad_factor,
+                threshold_upper,
             )
-            print(
-                f"   [Auto-RANSAC] Singlets: {n_singlets:,} ({n_singlets / valid.sum() * 100:.1f}%)"
+            _logger.info(
+                "   [Auto-RANSAC] Singlets: %d (%.1f%%)",
+                n_singlets,
+                n_singlets / valid.sum() * 100,
             )
-            print(
-                f"   [Auto-RANSAC] Doublets rejetés: {n_doublets:,} ({n_doublets / valid.sum() * 100:.1f}%)"
+            _logger.info(
+                "   [Auto-RANSAC] Doublets rejetés: %d (%.1f%%)",
+                n_doublets,
+                n_doublets / valid.sum() * 100,
             )
 
         # GateResult structuré
@@ -826,14 +855,14 @@ class AutoGating:
         )
 
         if cd45_idx is None:
-            print("[!] CD45 non trouvé pour auto-gate CD45+")
+            _logger.warning("[!] CD45 non trouvé pour auto-gate CD45+")
             return np.ones(n_cells, dtype=bool)
 
         cd45 = X[:, cd45_idx].astype(np.float64)
         valid = np.isfinite(cd45)
 
         if valid.sum() < 200:
-            print("[!] Pas assez de données valides pour auto-gate CD45+")
+            _logger.warning("[!] Pas assez de données valides pour auto-gate CD45+")
             return np.ones(n_cells, dtype=bool)
 
         # Mode uniform_gating: seuil soft par percentile (pas de GMM)
@@ -842,11 +871,15 @@ class AutoGating:
             mask = np.zeros(n_cells, dtype=bool)
             mask[valid] = cd45[valid] > threshold
             n_pos = mask.sum()
-            print(
-                f"   [Uniform-CD45] Seuil soft: {threshold:.0f} (percentile {threshold_percentile}%)"
+            _logger.info(
+                "   [Uniform-CD45] Seuil soft: %.0f (percentile %.0f%%)",
+                threshold,
+                threshold_percentile,
             )
-            print(
-                f"   [Uniform-CD45] CD45+ identifiés: {n_pos:,} ({n_pos / valid.sum() * 100:.1f}%)"
+            _logger.info(
+                "   [Uniform-CD45] CD45+ identifiés: %d (%.1f%%)",
+                n_pos,
+                n_pos / valid.sum() * 100,
             )
 
             gate_result = GateResult(
@@ -877,7 +910,7 @@ class AutoGating:
             )
         except RuntimeError as e:
             warn_msg = f"GMM CD45 échoué: {e} — fallback percentile"
-            print(f"   [!] {warn_msg}")
+            _logger.warning("   [!] %s", warn_msg)
             log_gating_event(
                 "cd45",
                 "gmm_fallback_percentile",
@@ -919,12 +952,12 @@ class AutoGating:
         mask[valid] = labels == pos_component
 
         n_pos = mask.sum()
-        print(f"   [Auto-GMM] CD45: {n_components} composantes, μ={means.round(0)}")
-        print(
-            f"   [Auto-GMM] Seuil adaptatif ≈ {threshold_approx:.0f} (creux entre populations)"
+        _logger.info("   [Auto-GMM] CD45: %d composantes, μ=%s", n_components, means.round(0))
+        _logger.info(
+            "   [Auto-GMM] Seuil adaptatif ≈ %.0f (creux entre populations)", threshold_approx
         )
-        print(
-            f"   [Auto-GMM] CD45+ identifiés: {n_pos:,} ({n_pos / valid.sum() * 100:.1f}%)"
+        _logger.info(
+            "   [Auto-GMM] CD45+ identifiés: %d (%.1f%%)", n_pos, n_pos / valid.sum() * 100
         )
 
         gate_result = GateResult(
@@ -982,14 +1015,14 @@ class AutoGating:
         )
 
         if cd34_idx is None:
-            print("[!] CD34 non trouvé pour auto-gate blastes")
+            _logger.warning("[!] CD34 non trouvé pour auto-gate blastes")
             return np.ones(n_cells, dtype=bool)
 
         cd34 = X[:, cd34_idx].astype(np.float64)
         valid = np.isfinite(cd34)
 
         if valid.sum() < 200:
-            print("[!] Pas assez de données valides pour auto-gate CD34")
+            _logger.warning("[!] Pas assez de données valides pour auto-gate CD34")
             return np.ones(n_cells, dtype=bool)
 
         # GMM pour séparer CD34- et CD34+
@@ -999,7 +1032,7 @@ class AutoGating:
             )
         except RuntimeError as e:
             warn_msg = f"GMM CD34 échoué: {e} — conservation de toutes les cellules"
-            print(f"   [!] {warn_msg}")
+            _logger.warning("   [!] %s", warn_msg)
             log_gating_event("cd34", "gmm", "error", {"error": str(e)}, warn_msg)
             return np.ones(n_cells, dtype=bool)
 
@@ -1011,8 +1044,10 @@ class AutoGating:
         mask_cd34[valid] = labels == pos_component
 
         n_cd34_pos = mask_cd34.sum()
-        print(
-            f"   [Auto-GMM] CD34: μ={means.round(0)}, CD34+ cluster = μ={means[pos_component]:.0f}"
+        _logger.info(
+            "   [Auto-GMM] CD34: μ=%s, CD34+ cluster = μ=%.0f",
+            means.round(0),
+            means[pos_component],
         )
 
         # Filtre SSC low optionnel (blastes = faible granularité)
@@ -1028,8 +1063,8 @@ class AutoGating:
                             ssc[valid_ssc].reshape(-1, 1), n_components=2, n_init=3
                         )
                     except RuntimeError as e:
-                        print(f"   [!] GMM SSC échoué: {e} — filtre SSC ignoré")
-                        print(f"   [Auto-GMM] CD34+ blastes: {n_cd34_pos:,}")
+                        _logger.warning("   [!] GMM SSC échoué: %s — filtre SSC ignoré", e)
+                        _logger.info("   [Auto-GMM] CD34+ blastes: %d", n_cd34_pos)
                         gate_result = GateResult(
                             mask=mask_cd34,
                             n_kept=int(n_cd34_pos),
@@ -1050,8 +1085,10 @@ class AutoGating:
                     mask_ssc[valid_ssc] = labels_ssc == low_ssc_component
 
                     combined = mask_cd34 & mask_ssc
-                    print(
-                        f"   [Auto-GMM] + Filtre SSC low (μ={ssc_means[low_ssc_component]:.0f}): {combined.sum():,} blastes purs"
+                    _logger.info(
+                        "   [Auto-GMM] + Filtre SSC low (μ=%.0f): %d blastes purs",
+                        ssc_means[low_ssc_component],
+                        combined.sum(),
                     )
 
                     gate_result = GateResult(
@@ -1079,7 +1116,7 @@ class AutoGating:
                     )
                     return combined
 
-        print(f"   [Auto-GMM] CD34+ blastes: {n_cd34_pos:,}")
+        _logger.info("   [Auto-GMM] CD34+ blastes: %d", n_cd34_pos)
         gate_result = GateResult(
             mask=mask_cd34,
             n_kept=int(n_cd34_pos),

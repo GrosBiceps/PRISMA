@@ -1792,8 +1792,8 @@ def compute_exclusive_clusters(
 
     summary_lines.append(f"\n    Clusters mixtes (partagés): {len(mixed)}")
 
-    for line in summary_lines:
-        _logger.info(line)
+    # Ne pas logger ici : l'appelant (pipeline_executor) logue les summary_lines.
+    # Evite le double affichage dans la console GUI.
 
     return {
         "patho_only": patho_only,

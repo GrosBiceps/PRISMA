@@ -42,6 +42,8 @@ from flowsom_pipeline_pro.src.services.clustering_service import (
 )
 from flowsom_pipeline_pro.src.services.export_service import ExportService
 from flowsom_pipeline_pro.src.utils.logger import GatingLogger, get_logger
+from flowsom_pipeline_pro.src.models.gate_result import gating_reports, gating_log_entries
+from flowsom_pipeline_pro.src.core.auto_gating import ransac_scatter_data, singlets_summary_per_file
 
 _logger = get_logger("pipeline.executor")
 
@@ -95,13 +97,40 @@ class FlowSOMPipeline:
         config = self.config
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+        # Réinitialiser les registres globaux pour éviter la contamination entre runs
+        gating_reports.clear()
+        gating_log_entries.clear()
+        ransac_scatter_data.clear()
+        singlets_summary_per_file.clear()
+
         _logger.info("=" * 60)
         _logger.info("PIPELINE FLOWSOM — DÉMARRAGE")
         _logger.info("=" * 60)
 
+        # ── Monitoring de performance (optionnel) ─────────────────────────────
+        _monitor = None
+        _perf_cfg = getattr(config, "performance_monitoring", None)
+        if _perf_cfg and getattr(_perf_cfg, "enabled", False):
+            try:
+                from flowsom_pipeline_pro.src.monitoring.performance_monitor import (
+                    PerformanceMonitor,
+                )
+                _monitor = PerformanceMonitor(
+                    interval=getattr(_perf_cfg, "interval_seconds", 1.0),
+                    include_gpu=getattr(_perf_cfg, "include_gpu", True),
+                )
+                _monitor.start()
+                _logger.info("Performance monitor actif (interval=%.1fs)",
+                             _perf_cfg.interval_seconds)
+            except Exception as _me:
+                _logger.debug("Performance monitor non disponible: %s", _me)
+                _monitor = None
+
         try:
             # ── Étape 1: Chargement des fichiers FCS ──────────────────────────
             _logger.info("Étape 1: Chargement des fichiers FCS...")
+            if _monitor:
+                _monitor.mark_phase("Chargement FCS")
             samples = self._load_all_samples()
 
             if not samples:
@@ -118,6 +147,8 @@ class FlowSOMPipeline:
 
             # ── Étape 2: Prétraitement ───────────────────────────────────────────
             _logger.info("Étape 2: Prétraitement (gating combiné + transformation)...")
+            if _monitor:
+                _monitor.mark_phase("Prétraitement / Gating")
             # Utilise l'approche combinée (fidèle à flowsom_pipeline.py) :
             # gating sur les données brutes concaténées, sous-échantillonnage APRÈS.
             viz_cfg = getattr(config, "visualization", None)
@@ -144,6 +175,8 @@ class FlowSOMPipeline:
 
             # ── Étape 3: Clustering FlowSOM ───────────────────────────────────
             _logger.info("Étape 3: Clustering FlowSOM...")
+            if _monitor:
+                _monitor.mark_phase("Clustering SOM")
             metaclustering, clustering, clusterer, selected_markers = run_clustering(
                 processed_samples, config
             )
@@ -169,6 +202,8 @@ class FlowSOMPipeline:
 
             # ── Étape 4: Construction du DataFrame cellulaire ─────────────────
             _logger.info("Étape 4: Construction du DataFrame cellulaire...")
+            if _monitor:
+                _monitor.mark_phase("Construction DataFrame")
             df_cells = build_cells_dataframe(
                 X_stacked, selected_markers, obs, metaclustering, clustering
             )
@@ -197,6 +232,8 @@ class FlowSOMPipeline:
             )
 
             # ── Étape 5: Metrics de clustering ────────────────────────────────
+            if _monitor:
+                _monitor.mark_phase("Métriques + Visualisations")
             metrics = self._compute_metrics(X_stacked, metaclustering)
             # ── Accumulation des figures pour le rapport HTML ─────────────────
             # Clés calquées sur les noms du notebook de référence
@@ -456,6 +493,8 @@ class FlowSOMPipeline:
 
             # ── Étape 6: Exports ───────────────────────────────────────────────────
             _logger.info("Étape 6: Exports...")
+            if _monitor:
+                _monitor.mark_phase("Exports FCS / CSV / JSON")
             exporter = ExportService(config, output_dir, timestamp=timestamp)
 
             input_files = [str(s.path) for s in samples]
@@ -543,6 +582,8 @@ class FlowSOMPipeline:
                     _logger.warning("Sankey échoué (non bloquant): %s", _e)
 
             # ── Étape 7: Mapping des populations (Section 10) ─────────────────
+            if _monitor:
+                _monitor.mark_phase("Population Mapping")
             population_mapping_result = None
             pop_map_cfg = getattr(config, "population_mapping", None)
             if pop_map_cfg is not None and getattr(pop_map_cfg, "enabled", False):
@@ -603,6 +644,8 @@ class FlowSOMPipeline:
                     )
 
             # ── Étape 8: Calcul MRD résiduelle ────────────────────────────────
+            if _monitor:
+                _monitor.mark_phase("MRD")
             mrd_result = None
             try:
                 from flowsom_pipeline_pro.src.analysis.mrd_calculator import (
@@ -645,8 +688,47 @@ class FlowSOMPipeline:
             except Exception as _mrd_exc:
                 _logger.warning("Étape 8 MRD échouée (non bloquant): %s", _mrd_exc)
 
+            # ── Étape 8b: Export FCS pathologique + Is_MRD ───────────────────
+            _patho_fcs_cfg = getattr(config, "patho_fcs_export", None)
+            if (
+                _patho_fcs_cfg is not None
+                and getattr(_patho_fcs_cfg, "enabled", False)
+                and mrd_result is not None
+                and df_fcs is not None
+            ):
+                try:
+                    from flowsom_pipeline_pro.src.io.patho_fcs_exporter import (
+                        export_patho_mrd_fcs,
+                    )
+
+                    _mrd_method = getattr(_patho_fcs_cfg, "mrd_method", "flo")
+                    _patho_fcs_path = (
+                        output_dir / "fcs" / f"patho_mrd_{timestamp}.fcs"
+                    )
+                    _patho_fcs_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    _logger.info(
+                        "Étape 8b: Export FCS pathologique (Is_MRD=%s)...",
+                        _mrd_method.upper(),
+                    )
+                    ok = export_patho_mrd_fcs(
+                        df_fcs=df_fcs,
+                        mrd_result=mrd_result,
+                        output_path=_patho_fcs_path,
+                        mrd_method=_mrd_method,
+                    )
+                    if ok:
+                        export_paths["fcs_patho_mrd"] = str(_patho_fcs_path)
+                        _logger.info("FCS pathologique: %s", _patho_fcs_path.name)
+                except Exception as _pfe:
+                    _logger.warning(
+                        "Étape 8b export FCS pathologique échoué (non bloquant): %s", _pfe
+                    )
+
             # ── Rapport HTML self-contained (APRÈS étape 8) ──────────────────
             if viz_save:
+                if _monitor:
+                    _monitor.mark_phase("Rapport HTML / PDF")
                 try:
                     _logger.info("Génération du rapport HTML...")
                     mc_table = [
@@ -752,6 +834,52 @@ class FlowSOMPipeline:
                 except Exception as _e:
                     _logger.warning("Rapport HTML échoué (non bloquant): %s", _e)
 
+                # ── Rapport PDF A4 ────────────────────────────────────────────
+                try:
+                    pdf_path = exporter.export_pdf_report(
+                        analysis_params={
+                            "Transformation": config.transform.method,
+                            "Normalisation": config.normalize.method,
+                            "Grille SOM": f"{config.flowsom.xdim}×{config.flowsom.ydim}",
+                            "Métaclusters": n_meta,
+                            "Seed": config.flowsom.seed,
+                        },
+                        summary_stats={
+                            "n_cells": int(X_stacked.shape[0]),
+                            "n_markers": len(selected_markers),
+                            "n_files": len(samples),
+                            "n_clusters": n_meta,
+                        },
+                        metacluster_table=mc_table,
+                        markers=list(selected_markers),
+                        matplotlib_figures=_mpl_figures,
+                        plotly_figures=_plotly_figures,
+                        figure_labels=_FIGURE_LABELS,
+                        condition_data=condition_data,
+                        files_data=files_data,
+                        export_paths=export_paths,
+                    )
+                    if pdf_path:
+                        export_paths["pdf_report"] = pdf_path
+                        _logger.info("Rapport PDF: %s", pdf_path)
+                except Exception as _e:
+                    _logger.warning("Rapport PDF échoué (non bloquant): %s", _e)
+
+            # ── Export dashboard de performance ───────────────────────────────
+            if _monitor:
+                try:
+                    _monitor.mark_phase("Terminé")
+                    _monitor.stop()
+                    _dash_path = _monitor.export_dashboard(
+                        Path(config.paths.output_dir) / "other"
+                        / f"performance_dashboard_{timestamp}.html"
+                    )
+                    if _dash_path:
+                        export_paths["performance_dashboard"] = _dash_path
+                        _logger.info("Dashboard performance : %s", _dash_path)
+                except Exception as _me:
+                    _logger.debug("Export dashboard performance échoué: %s", _me)
+
             # ── Assemblage du résultat ────────────────────────────────────────
             elapsed = time.time() - start_time
 
@@ -778,6 +906,12 @@ class FlowSOMPipeline:
             return result
 
         except Exception as exc:
+            # Arrêter le monitor proprement même en cas d'erreur
+            if _monitor:
+                try:
+                    _monitor.stop()
+                except Exception:
+                    pass
             _logger.exception("Erreur critique dans le pipeline: %s", exc)
             # Sécurité : écrire l'erreur dans un fichier pour le mode frozen
             # (logging peut échouer si sys.stderr est None)

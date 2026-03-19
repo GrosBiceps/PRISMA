@@ -377,3 +377,48 @@ class ExportService:
         )
 
         return str(html_path) if ok else None
+
+    def export_pdf_report(
+        self,
+        *,
+        plotly_figures: Optional[Dict[str, Any]] = None,
+        matplotlib_figures: Optional[Dict[str, Any]] = None,
+        figure_labels: Optional[Dict[str, str]] = None,
+        analysis_params: Optional[Dict[str, Any]] = None,
+        summary_stats: Optional[Dict[str, Any]] = None,
+        metacluster_table: Optional[List[Dict[str, Any]]] = None,
+        markers: Optional[List[str]] = None,
+        condition_data: Optional[List[Dict[str, Any]]] = None,
+        files_data: Optional[List[Dict[str, Any]]] = None,
+        export_paths: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """
+        Génère le rapport PDF A4 complet (même contenu que le HTML).
+
+        Nécessite : reportlab >= 4.0 et kaleido >= 0.1 pour les figures Plotly.
+
+        Returns:
+            Chemin du fichier PDF si succès, None sinon.
+        """
+        from flowsom_pipeline_pro.src.visualization.pdf_report import (
+            generate_pdf_report,
+        )
+
+        ts = self.timestamp
+        pdf_path = self._dirs["other"] / f"flowsom_report_{ts}.pdf"
+
+        return generate_pdf_report(
+            pdf_path,
+            plotly_figures=plotly_figures,
+            matplotlib_figures=matplotlib_figures,
+            figure_labels=figure_labels,
+            analysis_params=analysis_params,
+            summary_stats=summary_stats,
+            metacluster_table=metacluster_table,
+            markers=markers,
+            condition_data=condition_data,
+            files_data=files_data,
+            export_paths=export_paths,
+            timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"),
+        )
+

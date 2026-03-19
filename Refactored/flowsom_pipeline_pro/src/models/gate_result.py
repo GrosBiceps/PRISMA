@@ -9,11 +9,14 @@ de permettre un audit complet des décisions de gating.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+_logger = logging.getLogger("models.gate_result")
 
 
 @dataclass
@@ -114,8 +117,8 @@ def log_gating_event(
     gate_name: str,
     method: str,
     status: str,
-    details: Dict[str, Any] = None,
-    warning_msg: str = None,
+    details: Optional[Dict[str, Any]] = None,
+    warning_msg: Optional[str] = None,
 ):
     """Log structuré d'un événement de gating (JSON exportable)."""
     entry = {
@@ -127,8 +130,5 @@ def log_gating_event(
     }
     if warning_msg:
         entry["warning"] = warning_msg
-        print(f"   [WARNING] {gate_name}: {warning_msg}")
+        _logger.warning("%s: %s", gate_name, warning_msg)
     gating_log_entries.append(entry)
-
-
-print("\n[OK] GateResult dataclass + logging structuré chargés")
