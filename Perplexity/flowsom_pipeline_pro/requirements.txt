@@ -1,0 +1,62 @@
+# ============================================================
+# requirements.txt — FlowSOM MRD Pipeline
+# Python 3.11+
+# ============================================================
+
+# ── Cytométrie / FlowSOM (CRITIQUE) ─────────────────────────
+flowsom>=0.2.2               # algorithme principal (fs.FlowSOM, fs.metaclustering)
+flowio>=1.4.0                # lecture/écriture FCS natif
+fcswrite>=0.6.4              # export FCS avec colonnes de clustering
+pytometry>=0.1.6             # transformations logicle/arcsinh, prétraitement
+umap-learn>=0.5.11           # réduction dimensionnelle (visualisation)
+anndata>=0.12.0              # structure de données cellules × marqueurs
+mudata>=0.3.0                # conteneur multi-modalité (FlowSOM interne)
+
+# ── Calcul scientifique ──────────────────────────────────────
+numpy>=1.26,<2.0             # 1.x requis par numba ; éviter numpy 2.x
+pandas>=2.0                  # manipulation tabulaire
+scipy>=1.10                  # stats (Mann-Whitney, KS, cdist)
+scikit-learn>=1.4            # silhouette, AgglomerativeClustering
+numba>=0.58                  # JIT du SOM CPU (FlowSOM interne, _som.py)
+igraph>=1.0                  # MST pour le SOM grid (FlowSOM interne)
+networkx>=3.0                # graphes (dépendance torch.compile / scanpy)
+
+# ── GPU (PyTorch CUDA) ───────────────────────────────────────
+# Installer la variante CUDA correspondant à votre driver :
+#   CUDA 12.6  (RTX 30xx/40xx, driver ≥ 525) :
+#     pip install torch --index-url https://download.pytorch.org/whl/cu126
+#   CUDA 11.8  (driver ≥ 450) :
+#     pip install torch --index-url https://download.pytorch.org/whl/cu118
+#   CPU uniquement :
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# La ligne ci-dessous installe la version CPU par défaut (PyPI).
+# Remplacer par la commande --index-url appropriée pour le GPU :
+torch>=2.0
+
+# ── Scanpy (pipeline sc.pp / sc.tl) ─────────────────────────
+scanpy>=1.9
+
+# ── Interface et visualisation ───────────────────────────────
+matplotlib>=3.7
+seaborn>=0.12
+reportlab>=4.0               # génération rapports PDF
+kaleido>=0.1.0               # export statique des figures Plotly
+plotly>=5.0
+PyQt5
+PyQtWebEngine                # visualisations interactives (figures HTML)
+
+# ── Monitoring de performance système ────────────────────────
+psutil>=5.9                  # collecte CPU / RAM / Disque / Réseau en temps réel
+GPUtil>=1.4.0                # métriques GPU NVIDIA (optionnel — ne bloque pas si absent)
+
+# ── Configuration ────────────────────────────────────────────
+PyYAML>=6.0
+
+# ── Logging ──────────────────────────────────────────────────
+loguru>=0.7
+
+# ── Notebooks Jupyter ────────────────────────────────────────
+ipykernel>=6.0
+ipywidgets>=8.0
+tqdm>=4.60

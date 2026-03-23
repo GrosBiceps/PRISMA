@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Configuration MRD résiduelle — FlowSOM Pipeline Pro
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  Trois méthodes de calcul de la MRD résiduelle :
+#
+#  Méthode JF :
+#    Un nœud SOM est qualifié de MRD si :
+#      1. % moelle normale dans le nœud < max_normal_marrow_pct
+#      2. % cellules pathologiques dans le nœud > min_patho_cells_pct
+#
+#  Méthode Flo :
+#    Un nœud SOM est qualifié de MRD si :
+#      1. % cellules pathologiques > (% moelle normale × normal_marrow_multiplier)
+#
+#  Méthode ELN (European LeukemiaNet 2018/2021/2025 - DfN) :
+#    Applique les filtres ELN avant la qualification DfN :
+#      1. Le nœud doit contenir >= min_cluster_events cellules (LOQ = 50)
+#      2. Le nœud doit avoir un % patho > % sain (logique DfN)
+#      3. La MRD globale est déclarée positive si >= clinical_positivity_pct (0.1%)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+mrd_parameters:
+
+  # Activer le calcul MRD en fin de pipeline
+  enabled: true
+
+  # Méthode à utiliser : "jf", "flo", "eln", ou "all" (les trois en parallèle)
+  method: "all"
+
+  # ── Recommandations ELN (European LeukemiaNet 2025) ────────────────────
+  eln_standards:
+    # Nombre minimum d'événements dans un nœud SOM pour être quantifiable (LOQ)
+    min_cluster_events: 50
+    # Seuil global ELN pour déclarer la MRD cliniquement positive (en %)
+    clinical_positivity_pct: 0.1
+
+  # ── Méthode JF ──────────────────────────────────────────────────────────
+  method_jf:
+    # % maximum de moelle normale toléré dans le nœud (en %)
+    max_normal_marrow_pct: 0.1
+    # % minimum de cellules pathologiques requis dans le nœud (en %)
+    min_patho_cells_pct: 10.0
+
+  # ── Méthode Flo ─────────────────────────────────────────────────────────
+  method_flo:
+    # Multiplicateur : le % patho doit dépasser N × le % moelle normale
+    normal_marrow_multiplier: 2.0
+
+  # ── Labels des conditions dans le DataFrame ────────────────────────────
+  condition_sain: "Sain"
+  condition_patho: "Pathologique"
