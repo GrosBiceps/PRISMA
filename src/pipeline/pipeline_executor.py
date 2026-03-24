@@ -1326,33 +1326,37 @@ class BatchPipeline:
                     continue
 
                 row["Cellules totales"] = result.n_cells
-                row["Métaclusters"] = result.n_metaclusters
                 row["Durée (s)"] = round(result.elapsed_seconds, 1)
 
                 # MRD
                 mrd = result.mrd_result
                 if mrd is not None:
-                    row["MRD % (Flo)"] = round(getattr(mrd, "mrd_pct_flo", 0.0) * 100, 4)
-                    row["MRD % (JF)"] = round(getattr(mrd, "mrd_pct_jf", 0.0) * 100, 4)
-                    row["MRD % (ELN)"] = round(getattr(mrd, "mrd_pct_eln", 0.0) * 100, 4)
-                    row["Nœuds MRD Flo"] = getattr(mrd, "n_nodes_flo", None)
-                    row["Nœuds MRD JF"] = getattr(mrd, "n_nodes_jf", None)
-                    row["ELN positif"] = getattr(mrd, "eln_positive", None)
-
-                # Distribution cellules par métacluster
-                if result.data is not None and "FlowSOM_metacluster" in result.data.columns:
-                    mc_counts = result.data["FlowSOM_metacluster"].value_counts().sort_index()
-                    n_total = len(result.data)
-                    for mc_id, n_mc in mc_counts.items():
-                        row[f"MC{int(mc_id)} cellules"] = int(n_mc)
-                        row[f"MC{int(mc_id)} %"] = round(n_mc / n_total * 100, 2)
-
-                # Cellules par condition
-                if result.data is not None and "condition" in result.data.columns:
-                    cond_counts = result.data["condition"].value_counts()
-                    for cond, n_c in cond_counts.items():
-                        row[f"Cellules {cond}"] = int(n_c)
-                        row[f"% {cond}"] = round(n_c / len(result.data) * 100, 2)
+                    n_total = mrd.total_cells or 1
+                    # Cellules par condition
+                    row["Cellules patho"] = mrd.total_cells_patho
+                    row["Cellules sain"] = mrd.total_cells_sain
+                    row["% patho"] = round(mrd.total_cells_patho / n_total * 100, 2)
+                    # MRD % — valeurs déjà en % dans MRDResult
+                    row["MRD % (Flo)"] = round(mrd.mrd_pct_flo, 4)
+                    row["MRD % (JF)"] = round(mrd.mrd_pct_jf, 4)
+                    row["MRD % (ELN)"] = round(mrd.mrd_pct_eln, 4)
+                    # Cellules MRD détectées
+                    row["Cellules MRD (Flo)"] = mrd.mrd_cells_flo
+                    row["Cellules MRD (JF)"] = mrd.mrd_cells_jf
+                    row["Cellules MRD (ELN)"] = mrd.mrd_cells_eln
+                    # Nœuds SOM positifs
+                    row["Nœuds MRD (Flo)"] = mrd.n_nodes_mrd_flo
+                    row["Nœuds MRD (JF)"] = mrd.n_nodes_mrd_jf
+                    row["Nœuds MRD (ELN)"] = mrd.n_nodes_mrd_eln
+                    # Statut ELN
+                    row["ELN positif"] = "Oui" if mrd.eln_positive else "Non"
+                    row["ELN bas niveau"] = "Oui" if mrd.eln_low_level else "Non"
+                else:
+                    # Cellules par condition (si pas de MRD calculé)
+                    if result.data is not None and "condition" in result.data.columns:
+                        cond_counts = result.data["condition"].value_counts()
+                        for cond, n_c in cond_counts.items():
+                            row[f"Cellules {cond}"] = int(n_c)
 
                 # Rapport HTML généré
                 html = result.output_files.get("html_report", "")
