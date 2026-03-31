@@ -109,6 +109,7 @@ if _RL:
 _WIDE_KEYS = frozenset({
     "fig_som_combined", "fig_mrd_summary", "fig_grid_mc",
     "fig_heatmap", "fig_heatmap_clinical", "fig_radar", "fig_cluster_radar",
+    "fig_cluster_radar_jf", "fig_cluster_radar_flo",
 })
 
 # Ordre de rendu identique au rapport HTML
@@ -121,6 +122,7 @@ _FIG_ORDER = [
     "fig_star_chart", "fig_som_grid_static", "fig_barplots", "fig_heatmap_clinical",
     # Plotly → PNG statique
     "fig_sankey", "fig_mst", "fig_grid_mc", "fig_radar", "fig_cluster_radar",
+    "fig_cluster_radar_jf", "fig_cluster_radar_flo",
     "fig_patho_pct", "fig_cells_pct", "fig_patho_pct_som", "fig_cells_pct_som",
     "fig_som_combined", "fig_mrd_summary",
 ]

@@ -1889,6 +1889,161 @@ def plot_cluster_radar(
 
 
 # =============================================================================
+# SECTION §14b — Radar MRD : clusters sélectionnés par méthode JF ou Flo
+# =============================================================================
+
+
+def plot_cluster_radar_mrd(
+    X: np.ndarray,
+    clustering: np.ndarray,
+    used_markers: List[str],
+    mrd_node_ids: List[int],
+    output_path: "Path | str",
+    *,
+    title: str = "Profils d'Expression — Clusters MRD",
+    method_label: str = "",
+) -> "Optional[Any]":
+    """
+    Radar chart interactif Plotly — uniquement les nœuds SOM sélectionnés par
+    une méthode MRD (JF ou Flo).
+
+    Identique à ``plot_cluster_radar`` mais filtré sur ``mrd_node_ids``.
+    Si la liste est vide, retourne None sans générer de fichier.
+
+    Args:
+        X: Matrice de données (n_cells × n_markers).
+        clustering: Assignation de nœud SOM par cellule (n_cells,).
+        used_markers: Noms des marqueurs.
+        mrd_node_ids: Identifiants des nœuds SOM retenus par la méthode.
+        output_path: Chemin HTML de sauvegarde.
+        title: Titre de la figure.
+        method_label: Étiquette de la méthode pour les traces (ex. "JF").
+
+    Returns:
+        ``plotly.graph_objects.Figure`` ou None.
+    """
+    try:
+        import plotly.graph_objects as go
+        import plotly.colors as pc
+    except ImportError:
+        _logger.warning("plotly requis pour plot_cluster_radar_mrd")
+        return None
+
+    if not mrd_node_ids:
+        _logger.info("plot_cluster_radar_mrd (%s): aucun nœud MRD — figure ignorée", method_label)
+        return None
+
+    try:
+        node_ids = sorted(set(mrd_node_ids))
+        n_nodes = len(node_ids)
+
+        if n_nodes <= 10:
+            _palette = pc.qualitative.Set3
+        elif n_nodes <= 20:
+            _palette = pc.qualitative.Alphabet
+        else:
+            _palette = [
+                f"hsl({int(i * 360 / n_nodes)},70%,55%)"
+                for i in range(n_nodes)
+            ]
+
+        fig = go.Figure()
+
+        for idx, nid in enumerate(node_ids):
+            mask = clustering == nid
+            n_cells = int(mask.sum())
+            if n_cells == 0:
+                continue
+            mfi = np.median(X[mask], axis=0).astype(float)
+            v_min, v_max = float(mfi.min()), float(mfi.max())
+            mfi_norm = (mfi - v_min) / (v_max - v_min + 1e-10)
+
+            _c = _palette[idx % len(_palette)]
+            if "rgb" in str(_c):
+                _fill = _c.replace(")", ",0.12)").replace("rgb", "rgba")
+            else:
+                _fill = "rgba(128,128,128,0.08)"
+
+            trace_name = f"C{int(nid)}  ({n_cells:,} cells)"
+            if method_label:
+                trace_name = f"[{method_label}] C{int(nid)}  ({n_cells:,} cells)"
+
+            fig.add_trace(
+                go.Scatterpolar(
+                    r=np.append(mfi_norm, mfi_norm[0]),
+                    theta=list(used_markers) + [used_markers[0]],
+                    fill="toself",
+                    fillcolor=_fill,
+                    opacity=0.9,
+                    name=trace_name,
+                    line=dict(color=_c, width=2),
+                    marker=dict(size=5),
+                    customdata=np.stack(
+                        [
+                            np.append(mfi, mfi[0]),
+                            np.append(mfi_norm, mfi_norm[0]),
+                        ],
+                        axis=-1,
+                    ),
+                    hovertemplate=(
+                        f"<b>Cluster {int(nid)}</b><br>"
+                        "Marqueur: %{theta}<br>"
+                        "MFI brute: %{customdata[0]:.2f}<br>"
+                        "Normalisé: %{customdata[1]:.3f}<extra></extra>"
+                    ),
+                )
+            )
+
+        # Annotation indiquant le nombre de clusters retenus
+        subtitle = f"{n_nodes} nœud(s) MRD"
+        if method_label:
+            subtitle = f"Méthode {method_label} — {n_nodes} nœud(s) MRD"
+
+        fig.update_layout(
+            polar=dict(
+                bgcolor="#1e1e2e",
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 1.05],
+                    tickfont=dict(size=9, color="white"),
+                    gridcolor="rgba(255,255,255,0.15)",
+                    linecolor="rgba(255,255,255,0.3)",
+                ),
+                angularaxis=dict(
+                    tickfont=dict(size=10, color="white"),
+                    gridcolor="rgba(255,255,255,0.15)",
+                    linecolor="rgba(255,255,255,0.3)",
+                ),
+            ),
+            showlegend=True,
+            title=dict(
+                text=f"{title}<br><sup>{subtitle}</sup>",
+                font=dict(size=16, color="white"),
+                x=0.5,
+            ),
+            paper_bgcolor="#1e1e2e",
+            plot_bgcolor="#1e1e2e",
+            font=dict(color="white"),
+            legend=dict(
+                bgcolor="#313244",
+                bordercolor="#45475a",
+                font=dict(color="white"),
+            ),
+            height=700,
+        )
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(str(output_path), include_plotlyjs="cdn")
+        _logger.info("Radar MRD (%s) sauvegardé: %s", method_label, output_path)
+        return fig
+
+    except Exception as exc:
+        _logger.error("Échec plot_cluster_radar_mrd (%s): %s", method_label, exc)
+        return None
+
+
+# =============================================================================
 # SECTION §15 — Analyse des clusters exclusifs (100% Patho / 100% Sain)
 # =============================================================================
 

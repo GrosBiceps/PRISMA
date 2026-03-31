@@ -99,6 +99,11 @@ class PregateConfig:
     gmm_covariance_type: str = "full"   # "full" | "tied" | "diag" | "spherical"
     gmm_n_components_debris: int = 3    # Nombre de composantes pour le gating débris
     gmm_export_plot: bool = True        # Exporter le graphique des densités GMM
+    # Paramètres KDE 1D pour le gating CD45 (méthode pied du pic)
+    kde_cd45_seuil_relatif: float = 0.05   # Fraction du max densité pour le pied du pic
+    kde_cd45_finesse: float = 0.6          # Facteur bandwidth Silverman
+    kde_cd45_sigma_smooth: int = 10        # Lissage gaussien sur la courbe KDE (sigma)
+    kde_cd45_n_grid: int = 4000            # Résolution de la grille KDE
 
 
 @dataclass
@@ -425,6 +430,10 @@ class PipelineConfig:
             "gmm_covariance_type": "gmm_covariance_type",
             "gmm_n_components_debris": "gmm_n_components_debris",
             "gmm_export_plot": "gmm_export_plot",
+            "kde_cd45_seuil_relatif": "kde_cd45_seuil_relatif",
+            "kde_cd45_finesse": "kde_cd45_finesse",
+            "kde_cd45_sigma_smooth": "kde_cd45_sigma_smooth",
+            "kde_cd45_n_grid": "kde_cd45_n_grid",
         }
         for yaml_key, attr in mapping_pregate.items():
             if yaml_key in pg_adv:

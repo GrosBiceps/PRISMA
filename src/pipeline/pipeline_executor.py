@@ -727,6 +727,40 @@ class FlowSOMPipeline:
                             output_png=output_dir / "plots" / f"mrd_summary_{timestamp}.png" if _export_png_mrd else None,
                         )
 
+                    # Radars MRD — un par méthode (JF et Flo)
+                    if mrd_result is not None and viz_save:
+                        from flowsom_pipeline_pro.src.visualization.flowsom_plots import (
+                            plot_cluster_radar_mrd,
+                        )
+                        _jf_nodes = [
+                            n.cluster_id for n in mrd_result.per_node if n.is_mrd_jf
+                        ]
+                        _flo_nodes = [
+                            n.cluster_id for n in mrd_result.per_node if n.is_mrd_flo
+                        ]
+                        _safe_plot(
+                            "Radar MRD JF", _plotly_figures, "fig_cluster_radar_jf",
+                            plot_cluster_radar_mrd,
+                            X_stacked,
+                            clustering,
+                            list(mfi_matrix.columns),
+                            _jf_nodes,
+                            output_dir / "plots" / f"cluster_radar_mrd_jf_{timestamp}.html",
+                            title="Profils d'Expression — Clusters MRD",
+                            method_label="JF",
+                        )
+                        _safe_plot(
+                            "Radar MRD Flo", _plotly_figures, "fig_cluster_radar_flo",
+                            plot_cluster_radar_mrd,
+                            X_stacked,
+                            clustering,
+                            list(mfi_matrix.columns),
+                            _flo_nodes,
+                            output_dir / "plots" / f"cluster_radar_mrd_flo_{timestamp}.html",
+                            title="Profils d'Expression — Clusters MRD",
+                            method_label="Flo",
+                        )
+
                     # Export JSON des résultats MRD
                     if mrd_result is not None:
                         try:
@@ -858,6 +892,8 @@ class FlowSOMPipeline:
                         "fig_barplots": "Blast Score — Profil Marqueurs",
                         "fig_radar": "Profils Blast — Radar Charts",
                         "fig_cluster_radar": "Profils d'Expression par Cluster SOM (Radar)",
+                        "fig_cluster_radar_jf": "Profils d'Expression — Clusters MRD Méthode JF (Radar)",
+                        "fig_cluster_radar_flo": "Profils d'Expression — Clusters MRD Méthode Flo (Radar)",
                         "fig_stars": "Blast Scores — Bar Chart",
                         "fig_patho_pct": "% Cellules Pathologiques par Cluster",
                         "fig_cells_pct": "% Cellules par Cluster (Distribution Globale)",

@@ -140,8 +140,9 @@ class MRDClusterResult:
     n_cells_total: int
     n_cells_sain: int
     n_cells_patho: int
-    pct_sain: float      # % de cellules saines dans ce nœud
-    pct_patho: float     # % de cellules pathologiques dans ce nœud
+    pct_sain: float        # % de cellules saines DANS ce nœud (par rapport au total du nœud)
+    pct_patho: float       # % de cellules pathologiques DANS ce nœud
+    pct_sain_global: float  # % des cellules saines de ce nœud / total moelle normale (méthode JF)
     is_mrd_jf: bool      # qualifié MRD par méthode JF
     is_mrd_flo: bool     # qualifié MRD par méthode Flo
     is_mrd_eln: bool     # qualifié MRD par méthode ELN
@@ -209,6 +210,7 @@ class MRDResult:
                     "n_cells_sain": c.n_cells_sain,
                     "n_cells_patho": c.n_cells_patho,
                     "pct_sain": round(c.pct_sain, 4),
+                    "pct_sain_global": round(c.pct_sain_global, 6),
                     "pct_patho": round(c.pct_patho, 4),
                     "is_mrd_jf": c.is_mrd_jf,
                     "is_mrd_flo": c.is_mrd_flo,
@@ -284,13 +286,30 @@ def compute_mrd(
         n_sain = int((cond_in_node == mrd_cfg.condition_sain).sum())
         n_patho = int((cond_in_node == mrd_cfg.condition_patho).sum())
 
+        # pct_sain / pct_patho : % AU SEIN du cluster (utilisé par Flo et ELN)
         pct_sain = (n_sain / n_in_node) * 100.0
         pct_patho = (n_patho / n_in_node) * 100.0
+
+        # pct_sain_global : % des cellules saines du cluster par rapport à la
+        # TOTALITÉ de la moelle normale (dénominateur = total_sain).
+        # C'est ce qu'utilise la méthode JF : un cluster MRD ne doit contenir
+        # qu'une infime fraction de la moelle normale totale (< max_normal_marrow_pct).
+        _denom_sain = total_sain if total_sain > 0 else 1
+        pct_sain_global = (n_sain / _denom_sain) * 100.0
+
+        # pct_patho_in_cluster : % de cellules pathologiques dans le cluster.
+        # Utilisé par la méthode JF pour vérifier que le cluster est
+        # massivement envahi (> min_patho_cells_pct).
+        # (pct_patho ci-dessus est identique, on l'utilise directement.)
 
         # ── Méthode JF ────────────────────────────────────────────────
         is_mrd_jf = False
         if run_jf:
-            if (pct_sain < mrd_cfg.method_jf.max_normal_marrow_pct
+            # Critère 1 : la fraction de moelle normale dans ce cluster doit être
+            #             < max_normal_marrow_pct (% GLOBAL de la moelle normale)
+            # Critère 2 : le cluster doit être composé à > min_patho_cells_pct
+            #             de cellules pathologiques (% DANS le cluster)
+            if (pct_sain_global < mrd_cfg.method_jf.max_normal_marrow_pct
                     and pct_patho > mrd_cfg.method_jf.min_patho_cells_pct):
                 is_mrd_jf = True
                 mrd_cells_jf += n_patho
@@ -323,6 +342,7 @@ def compute_mrd(
             n_cells_patho=n_patho,
             pct_sain=pct_sain,
             pct_patho=pct_patho,
+            pct_sain_global=pct_sain_global,
             is_mrd_jf=is_mrd_jf,
             is_mrd_flo=is_mrd_flo,
             is_mrd_eln=is_mrd_eln,

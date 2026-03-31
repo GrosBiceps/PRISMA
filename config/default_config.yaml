@@ -5,9 +5,9 @@
 pipeline_version: "2.0"
 
 paths:
-  healthy_folder: "C:\\Users\\Florian Travail\\Downloads\\BLAST110\\BLAST110\\FCS\\NBM\\LittleNBM" 
-  patho_folder: "C:\\Users\\Florian Travail\\Downloads\\BLAST110\\BLAST110\\FCS\\AML_Dx\\T1" 
-  output_dir: "C:\\Users\\Florian Travail\\Downloads\\BLAST110\\Résults"
+  healthy_folder: "C:/Users/Florian Travail/Downloads/BLAST110/BLAST110/FCS/NBM/LitlleNBM"
+  patho_folder: "C:/Users/Florian Travail/Downloads/BLAST110/BLAST110/FCS/AML_Dx/T1"
+  output_dir: "C:/Users/Florian Travail/Downloads/BLAST110/Résults"
 
 analysis:
   compare_mode: true         # true = comparer Sain vs Pathologique (doit être true pour les analyses différentielles)
@@ -39,6 +39,39 @@ pregate_advanced:
   # Le KDE est plus fidèle aux données mais plus lent et moins paramétrable.
   # Le GMM est recommandé car ses paramètres sont entièrement contrôlables ci-dessous.
   density_method: "GMM"
+
+  # ── Paramètres KDE 1D pour le gating CD45 (méthode pied du pic) ───────────────────
+  # Utilisés uniquement en mode auto pour le gate G3_cd45.
+  # La méthode "pied du pic" est plus robuste que le GMM pour les distributions
+  # asymétriques (CD45+ dominant, CD45- minoritaire) typiques de la moelle osseuse.
+  #
+  # Algorithme : KDE Silverman adaptatif → lissage gaussien → recul depuis le pic
+  #              principal jusqu'à descendre sous seuil_relatif × max(densité).
+  # Fallback automatique : Otsu 1D sur histogramme log-normalisé si aucun pied détecté.
+  #
+  # kde_cd45_seuil_relatif : Fraction du maximum de densité définissant le "pied" du pic
+  #   - 0.02 → très permissif (seuil très à gauche, inclut plus de CD45-)
+  #   - 0.05 → valeur recommandée (5% du max = pied du grand pic CD45+)
+  #   - 0.10 → plus strict (monte plus haut sur le flanc du pic, exclut plus)
+  kde_cd45_seuil_relatif: 0.05
+
+  # kde_cd45_finesse : Facteur multiplicateur du bandwidth Silverman
+  #   - 0.3 → très fin (KDE très piqué, révèle les petites structures)
+  #   - 0.6 → valeur recommandée (bon compromis résolution / lissage)
+  #   - 1.0 → Silverman pur (très lissé, peut masquer la vallée CD45-)
+  kde_cd45_finesse: 0.6
+
+  # kde_cd45_sigma_smooth : Sigma du filtre gaussien appliqué après KDE (en points de grille)
+  #   - 5  → peu de lissage (courbe plus bruitée)
+  #   - 10 → valeur recommandée
+  #   - 20 → fort lissage (utile si beaucoup de bruit ou distribution très étalée)
+  kde_cd45_sigma_smooth: 10
+
+  # kde_cd45_n_grid : Nombre de points de la grille d'évaluation KDE
+  #   - 1000 → rapide, résolution réduite
+  #   - 4000 → valeur recommandée (précision suffisante pour la cytométrie)
+  #   - 8000 → très haute résolution (plus lent, utile pour des données très fines)
+  kde_cd45_n_grid: 4000
   # ── Paramètres avancés du GMM ──────────────────────────────────────────────────────
   # covariance_type contrôle la forme des clusters GMM :
   #   "full"     : chaque cluster a sa propre matrice de covariance (défaut) — risque de sur-exclusion
@@ -83,7 +116,7 @@ normalize:
   method: "zscore"    # zscore | minmax | none
 
 markers:
-  exclude_scatter: true # true = exclure les paramètres de diffusion (FSC/SSC) des marqueurs
+  exclude_scatter: false # true = exclure les paramètres de diffusion (FSC/SSC) des marqueurs
   exclude_additional: [] # Liste de marqueurs supplémentaires à exclure (ex: ["Time", "Event_length"])
   keep_area_only: true    # Supprime les doublons -H (Height) ; garde -A (Area) + FSC/SSC/Time
   # Patterns toujours exclus du clustering FlowSOM (insensible à la casse)

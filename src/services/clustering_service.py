@@ -78,7 +78,7 @@ def select_markers_for_clustering(
     # Cas 2: exclusion automatique
     markers = list(var_names)
 
-    if getattr(config.flowsom, "exclude_scatter", True):
+    if getattr(config.markers, "exclude_scatter", True):
         markers = [
             m for m in markers if not any(p in m.upper() for p in SCATTER_PATTERNS)
         ]

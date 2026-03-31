@@ -117,6 +117,7 @@ class PipelineWorker(QThread):
 
         # Installe le handler de log pour capturer les messages ET la progression
         root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG)  # Garantit que INFO/DEBUG passent en mode frozen
         self._log_handler = LogCapture(self.log_message, progress_signal=self.progress)
         self._log_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(self._log_handler)

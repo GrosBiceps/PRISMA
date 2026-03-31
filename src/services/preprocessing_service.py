@@ -313,7 +313,14 @@ def _apply_gating(
             )
         else:
             if mode == "auto":
-                mask = AutoGating.auto_gate_cd45(X, var_names)
+                mask = AutoGating.auto_gate_cd45(
+                    X, var_names,
+                    kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
+                    kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
+                    kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
+                )
             else:
                 mask = PreGating.gate_cd45_positive(
                     X,
@@ -635,6 +642,10 @@ def preprocess_combined(
     # ── 5+6. Transformation cytométrique + Normalisation ──────────────────────
     X_raw = _apply_transforms(X_raw, var_names, config)
 
+    # Mise à jour X_for_plot avec les données transformées (logicle/arcsinh)
+    # pour que le comptage CD45+ brut soit dans le même espace que le gating.
+    X_for_plot = X_raw.copy()
+
     # ── 7. Split par fichier — AUCUN sous-échantillonnage avant FlowSOM ────────
     # Identique au monolithe flowsom_pipeline.py : FlowSOM s'entraîne sur
     # L'INTÉGRALITÉ des cellules gatées. Le SOM (grille xdim×ydim) fait lui-même
@@ -690,9 +701,9 @@ def preprocess_combined(
             n_file,
         )
 
-    # ── Comptage CD45+ sans autogating pipeline (GMM/KDE sur données brutes) ──
+    # ── Comptage CD45+ sans autogating pipeline (KDE pied du pic sur données brutes) ──
     # Utilise X_for_plot (données avant toute gate) pour compter les CD45+
-    # via GMM bimodal, sans influencer le pipeline de gating.
+    # via KDE 1D pied du pic (même méthode que auto_gate_cd45), sans influencer le pipeline.
     if gating_plot_dir is not None:
         try:
             _cd45_fig = _count_cd45_raw(
@@ -700,6 +711,10 @@ def preprocess_combined(
                 var_for_plot,
                 conditions_for_plot,
                 output_dir=Path(gating_plot_dir) / "gating",
+                kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
+                kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
+                kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
+                kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
             )
             if _cd45_fig is not None:
                 gating_figures["fig_cd45_count"] = _cd45_fig
@@ -719,10 +734,14 @@ def _count_cd45_raw(
     var_names: List[str],
     conditions: Optional[np.ndarray],
     output_dir: Optional[Path] = None,
+    kde_seuil_relatif: float = 0.05,
+    kde_finesse: float = 0.6,
+    kde_sigma_smooth: int = 10,
+    kde_n_grid: int = 4000,
 ) -> Optional[Any]:
     """
     Compte les événements CD45+ sur les données brutes (avant tout gating pipeline)
-    via GMM bimodal (fallback KDE si GMM échoue).
+    via KDE 1D méthode pied du pic (identique au gating G3 auto_gate_cd45).
 
     Ce comptage est purement informatif — il n'influence pas le pipeline de gating.
     L'objectif est de visualiser la population CD45+ telle qu'elle apparaît dans
@@ -733,6 +752,10 @@ def _count_cd45_raw(
         var_names: Noms des marqueurs.
         conditions: Conditions par cellule (optionnel, pour affichage).
         output_dir: Répertoire de sortie pour la figure PNG.
+        kde_seuil_relatif: Fraction du max densité pour le pied du pic KDE.
+        kde_finesse: Facteur bandwidth Silverman.
+        kde_sigma_smooth: Sigma du lissage gaussien sur la courbe KDE.
+        kde_n_grid: Résolution de la grille KDE.
 
     Returns:
         Figure matplotlib ou None.
@@ -741,12 +764,11 @@ def _count_cd45_raw(
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from sklearn.mixture import GaussianMixture
-        from scipy.stats import gaussian_kde
-        from scipy.signal import find_peaks
     except ImportError as _ie:
         _logger.warning("_count_cd45_raw: dépendances manquantes (%s)", _ie)
         return None
+
+    from flowsom_pipeline_pro.src.core.auto_gating import AutoGating
 
     cd45_idx = PreGating.find_marker_index(var_names, ["CD45", "CD45-PECY5", "CD45-PC5"])
     if cd45_idx is None:
@@ -762,53 +784,32 @@ def _count_cd45_raw(
         _logger.warning("_count_cd45_raw: pas assez de valeurs valides CD45")
         return None
 
-    # ── GMM bimodal ────────────────────────────────────────────────────────────
+    # ── KDE 1D pied du pic (même méthode que auto_gate_cd45) ──────────────────
     mask_pos = np.ones(n_total, dtype=bool)  # fallback = tout positif
     threshold = np.nan
     method_used = "none"
 
     try:
-        rng = np.random.default_rng(42)
-        n_fit = min(200_000, len(cd45_v))
-        idx_fit = rng.choice(len(cd45_v), size=n_fit, replace=False)
-        gmm = GaussianMixture(n_components=2, random_state=42, n_init=5, max_iter=200)
-        gmm.fit(cd45_v[idx_fit].reshape(-1, 1))
-        labels_v = gmm.predict(cd45_v.reshape(-1, 1))
-        means = gmm.means_.flatten()
-        pos_comp = int(np.argmax(means))
-        mask_valid_pos = labels_v == pos_comp
+        # Sous-échantillonnage pour KDE (gaussian_kde est O(N) en mémoire — blocage >1M pts)
+        _kde_max = 200_000
+        if len(cd45_v) > _kde_max:
+            _rng_kde = np.random.default_rng(42)
+            cd45_v_kde = cd45_v[_rng_kde.choice(len(cd45_v), size=_kde_max, replace=False)]
+        else:
+            cd45_v_kde = cd45_v
+        threshold, method_used = AutoGating._kde1d_seuil_pied_pic(
+            cd45_v_kde,
+            seuil_relatif=kde_seuil_relatif,
+            finesse=kde_finesse,
+            sigma_smooth=kde_sigma_smooth,
+            n_grid=kde_n_grid,
+        )
         mask_pos = np.zeros(n_total, dtype=bool)
-        mask_pos[valid] = mask_valid_pos
-        # Seuil approximatif = creux entre les 2 gaussiennes
-        stds = np.sqrt(gmm.covariances_.flatten())
-        sorted_idx = np.argsort(means)
-        m0, m1 = means[sorted_idx[0]], means[sorted_idx[1]]
-        s0, s1 = stds[sorted_idx[0]], stds[sorted_idx[1]]
-        threshold = (m0 * s1 + m1 * s0) / (s0 + s1)
-        method_used = "GMM"
-    except Exception as _gmm_err:
-        _logger.warning("_count_cd45_raw GMM échoué: %s — fallback KDE", _gmm_err)
-        try:
-            n_kde = min(50_000, len(cd45_v))
-            rng2 = np.random.default_rng(42)
-            sub = cd45_v[rng2.choice(len(cd45_v), size=n_kde, replace=False)]
-            kde = gaussian_kde(sub)
-            grid = np.linspace(cd45_v.min(), cd45_v.max(), 2000)
-            density = kde(grid)
-            # Vallée KDE = creux entre les deux pics
-            peaks, _ = find_peaks(density, prominence=density.max() * 0.05)
-            if len(peaks) >= 2:
-                valley_region = density[peaks[0]:peaks[-1]]
-                valley_local = int(np.argmin(valley_region)) + peaks[0]
-                threshold = float(grid[valley_local])
-            else:
-                threshold = float(np.percentile(cd45_v, 10))
-            mask_pos = np.zeros(n_total, dtype=bool)
-            mask_pos[valid] = cd45[valid] > threshold
-            method_used = "KDE"
-        except Exception as _kde_err:
-            _logger.warning("_count_cd45_raw KDE échoué: %s", _kde_err)
-            return None
+        mask_pos[valid] = cd45[valid] >= threshold
+        method_used = f"KDE pied du pic ({method_used})"
+    except Exception as _kde_err:
+        _logger.warning("_count_cd45_raw KDE échoué: %s", _kde_err)
+        return None
 
     n_pos = int(mask_pos.sum())
     pct_pos = n_pos / n_total * 100
@@ -833,90 +834,178 @@ def _count_cd45_raw(
         def save_figure(fig, path):  # type: ignore[misc]
             fig.savefig(str(path), dpi=100, bbox_inches="tight", facecolor=BG_COLOR)
 
-    fig, axes = plt.subplots(
-        1, 2, figsize=(14, 5),
-        facecolor=BG_COLOR,
-        gridspec_kw={"width_ratios": [2, 1]},
-    )
+    # ── Données pour les panneaux par condition ────────────────────────────────
+    cond_arr = np.asarray(conditions) if conditions is not None else None
+    has_conditions = cond_arr is not None and len(np.unique(cond_arr)) > 1
 
-    # Panneau gauche : densité KDE de CD45
-    ax_kde = axes[0]
-    n_plot = min(50_000, len(cd45_v))
+    # ── Sous-échantillonnage pour KDE visuel ───────────────────────────────────
+    n_plot = min(100_000, len(cd45_v))
     rng3 = np.random.default_rng(99)
-    sub_plot = cd45_v[rng3.choice(len(cd45_v), size=n_plot, replace=False)]
+    sub_idx = rng3.choice(len(cd45_v), size=n_plot, replace=False)
+    sub_plot = cd45_v[sub_idx]
+
+    # ── Grille KDE lissée pour la visualisation ────────────────────────────────
     try:
-        kde_plot = gaussian_kde(sub_plot)
-        grid_plot = np.linspace(sub_plot.min(), sub_plot.max(), 1000)
-        dens_plot = kde_plot(grid_plot)
-        ax_kde.fill_between(grid_plot, dens_plot, alpha=0.25, color="#89b4fa")
-        ax_kde.plot(grid_plot, dens_plot, color="#89b4fa", linewidth=1.5)
+        from scipy.stats import gaussian_kde as _gkde
+        from scipy.ndimage import gaussian_filter1d as _gf1d
+        _bw = 0.9 * min(np.std(sub_plot), (np.percentile(sub_plot, 75) - np.percentile(sub_plot, 25)) / 1.34) * len(sub_plot) ** (-0.2) * kde_finesse
+        _kde_vis = _gkde(sub_plot, bw_method=_bw / np.std(sub_plot))
+        grid_plot = np.linspace(cd45_v.min(), cd45_v.max(), 2000)
+        dens_plot = _gf1d(_kde_vis(grid_plot), sigma=kde_sigma_smooth)
+        kde_ok = True
+    except Exception:
+        kde_ok = False
+
+    # ── Layout 2 colonnes : KDE (large) + donut/bar (compact) ─────────────────
+    fig = plt.figure(figsize=(16, 6), facecolor=BG_COLOR)
+    gs = fig.add_gridspec(
+        1, 2,
+        width_ratios=[3, 1],
+        left=0.06, right=0.97,
+        bottom=0.13, top=0.88,
+        wspace=0.08,
+    )
+    ax_kde = fig.add_subplot(gs[0])
+    ax_pie = fig.add_subplot(gs[1])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PANNEAU GAUCHE — densité KDE annotée
+    # ══════════════════════════════════════════════════════════════════════════
+    n_neg = n_total - n_pos
+
+    if kde_ok:
+        # Zone CD45− (avant seuil)
+        ax_kde.fill_between(
+            grid_plot, dens_plot,
+            where=grid_plot < threshold,
+            alpha=0.20, color="#f38ba8",
+        )
+        # Zone CD45+ (après seuil)
+        ax_kde.fill_between(
+            grid_plot, dens_plot,
+            where=grid_plot >= threshold,
+            alpha=0.28, color="#a6e3a1",
+        )
+        # Courbe densité
+        ax_kde.plot(grid_plot, dens_plot, color="#89b4fa", linewidth=2.0, zorder=3)
+
+        # Ligne de seuil
         if np.isfinite(threshold):
             ax_kde.axvline(
-                threshold, color="#f38ba8", linestyle="--", linewidth=1.5,
-                label=f"Seuil {method_used}: {threshold:.0f}",
+                threshold, color="#f9e2af", linestyle="--", linewidth=2.0,
+                zorder=4, label=f"Seuil KDE : {threshold:.3f}",
             )
-        ax_kde.fill_between(
-            grid_plot,
-            dens_plot,
-            where=grid_plot >= threshold,
-            alpha=0.35,
-            color="#a6e3a1",
-            label=f"CD45+ ({n_pos:,} | {pct_pos:.1f}%)",
-        )
-    except Exception:
-        ax_kde.hist(sub_plot, bins=100, color="#89b4fa", alpha=0.6)
+            # Annotation flèchée sur le seuil
+            y_ann = dens_plot.max() * 0.55
+            ax_kde.annotate(
+                f"  {threshold:.3f}",
+                xy=(threshold, y_ann),
+                xytext=(threshold + (grid_plot[-1] - grid_plot[0]) * 0.04, y_ann),
+                color="#f9e2af", fontsize=9,
+                arrowprops=dict(arrowstyle="->", color="#f9e2af", lw=1.2),
+            )
 
-    ax_kde.set_xlabel("CD45 (intensité brute)", fontsize=11, color=TEXT_COLOR)
+        # Étiquettes populations
+        x_neg_center = (grid_plot[0] + threshold) / 2
+        x_pos_center = (threshold + grid_plot[-1]) / 2
+        y_label = dens_plot.max() * 0.07
+        ax_kde.text(
+            x_neg_center, y_label,
+            f"CD45−\n{n_neg:,} ({100*n_neg/n_total:.1f}%)",
+            ha="center", va="bottom", color="#f38ba8",
+            fontsize=9.5, fontweight="bold",
+            bbox=dict(facecolor=BG_COLOR, alpha=0.6, edgecolor="none", pad=2),
+        )
+        ax_kde.text(
+            x_pos_center, y_label,
+            f"CD45+\n{n_pos:,} ({pct_pos:.1f}%)",
+            ha="center", va="bottom", color="#a6e3a1",
+            fontsize=9.5, fontweight="bold",
+            bbox=dict(facecolor=BG_COLOR, alpha=0.6, edgecolor="none", pad=2),
+        )
+    else:
+        ax_kde.hist(sub_plot, bins=120, density=True, color="#89b4fa", alpha=0.5)
+        if np.isfinite(threshold):
+            ax_kde.axvline(threshold, color="#f9e2af", linestyle="--", linewidth=2.0)
+
+    ax_kde.set_xlabel("CD45 (espace logicle/arcsinh)", fontsize=11, color=TEXT_COLOR)
     ax_kde.set_ylabel("Densité", fontsize=11, color=TEXT_COLOR)
     ax_kde.set_title(
-        f"CD45+ bruts — méthode {method_used}\n"
-        f"{n_pos:,} / {n_total:,} événements ({pct_pos:.1f}%)",
-        fontsize=12, fontweight="bold", color=TEXT_COLOR,
+        f"Comptage CD45+ bruts — KDE pied du pic  ({method_used})",
+        fontsize=13, fontweight="bold", color=TEXT_COLOR, pad=8,
     )
     apply_dark_style(ax_kde)
-    ax_kde.legend(
-        facecolor=LEGEND_BG, labelcolor=TEXT_COLOR, edgecolor=SPINE_COLOR,
-        fontsize=9,
+    if np.isfinite(threshold):
+        ax_kde.legend(
+            facecolor=LEGEND_BG, labelcolor=TEXT_COLOR, edgecolor=SPINE_COLOR,
+            fontsize=9, loc="upper right",
+        )
+    # Supprimer les bordures top/right
+    ax_kde.spines["top"].set_visible(False)
+    ax_kde.spines["right"].set_visible(False)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PANNEAU DROIT — donut chart CD45− / CD45+  +  répartition par condition
+    # ══════════════════════════════════════════════════════════════════════════
+    wedge_sizes = [n_neg, n_pos]
+    wedge_colors = ["#f38ba8", "#a6e3a1"]
+    wedge_labels = [f"CD45−\n{100*n_neg/n_total:.1f}%", f"CD45+\n{pct_pos:.1f}%"]
+
+    wedges, _ = ax_pie.pie(
+        wedge_sizes,
+        colors=wedge_colors,
+        startangle=90,
+        wedgeprops=dict(width=0.52, edgecolor=BG_COLOR, linewidth=2),
+        labels=None,
     )
 
-    # Panneau droit : bar chart CD45− / CD45+
-    ax_bar = axes[1]
-    n_neg = n_total - n_pos
-    counts = [n_neg, n_pos]
-    labels_bar = [f"CD45−\n({n_neg:,})", f"CD45+\n({n_pos:,})"]
-    colors_bar = ["#f38ba8", "#a6e3a1"]
-    bars = ax_bar.bar(labels_bar, counts, color=colors_bar, edgecolor=SPINE_COLOR,
-                      width=0.55)
-    for bar, cnt in zip(bars, counts):
-        pct = cnt / n_total * 100
-        ax_bar.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() * 1.01,
-            f"{pct:.1f}%",
-            ha="center", va="bottom", color=TEXT_COLOR, fontsize=10,
-        )
+    # Annotations sur les tranches
+    for wedge, lbl, clr in zip(wedges, wedge_labels, ["#f38ba8", "#a6e3a1"]):
+        ang = (wedge.theta2 + wedge.theta1) / 2
+        x = np.cos(np.radians(ang)) * 0.72
+        y = np.sin(np.radians(ang)) * 0.72
+        ax_pie.text(x, y, lbl, ha="center", va="center",
+                    color=clr, fontsize=9.5, fontweight="bold")
 
-    # Si conditions fournies, afficher la répartition patho
-    if conditions is not None:
-        cond_arr = np.asarray(conditions)
-        _patho_mask = (cond_arr == "Pathologique") & mask_pos
-        n_patho_pos = int(_patho_mask.sum())
-        n_patho_tot = int((cond_arr == "Pathologique").sum())
-        if n_patho_tot > 0:
-            ax_bar.text(
-                0.5, 0.02,
-                f"Patho CD45+: {n_patho_pos:,}/{n_patho_tot:,} "
-                f"({100*n_patho_pos/n_patho_tot:.1f}%)",
-                transform=ax_bar.transAxes,
-                ha="center", va="bottom", color="#f9e2af", fontsize=8,
+    # Texte central du donut
+    ax_pie.text(
+        0, 0.08, f"{n_total:,}", ha="center", va="center",
+        color=TEXT_COLOR, fontsize=11, fontweight="bold",
+    )
+    ax_pie.text(
+        0, -0.18, "événements", ha="center", va="center",
+        color=TEXT_COLOR, fontsize=8, alpha=0.7,
+    )
+
+    # Répartition patho en dessous du donut (si disponible)
+    if has_conditions:
+        cond_labels_uniq = [c for c in np.unique(cond_arr) if isinstance(c, str)]
+        y_offset = -1.45
+        for cond in cond_labels_uniq:
+            cmask = (cond_arr == cond)
+            n_cond = int(cmask.sum())
+            n_cond_pos = int((cmask & mask_pos).sum())
+            pct_cond = 100 * n_cond_pos / n_cond if n_cond > 0 else 0
+            color_cond = "#a6e3a1" if any(k in cond.lower() for k in ("sain", "normal", "nbm", "healthy")) else "#f38ba8"
+            ax_pie.text(
+                0, y_offset,
+                f"{cond}: {n_cond_pos:,}/{n_cond:,}  ({pct_cond:.1f}%)",
+                ha="center", va="center",
+                color=color_cond, fontsize=8,
+                bbox=dict(facecolor=BG_COLOR, alpha=0.5, edgecolor="none", pad=1),
             )
+            y_offset -= 0.30
 
-    ax_bar.set_title("Comptage CD45+\n(données brutes)", fontsize=11,
-                     fontweight="bold", color=TEXT_COLOR)
-    ax_bar.set_ylabel("Nombre d'événements", fontsize=10, color=TEXT_COLOR)
-    apply_dark_style(ax_bar)
+    ax_pie.set_facecolor(BG_COLOR)
+    ax_pie.set_title("Répartition\nCD45", fontsize=10, fontweight="bold",
+                     color=TEXT_COLOR, pad=4)
 
-    fig.tight_layout(pad=1.5)
+    # Sous-titre global
+    fig.text(
+        0.5, 0.01,
+        f"Données : espace logicle/arcsinh — {n_total:,} événements poolés avant gating pipeline",
+        ha="center", fontsize=8, color=TEXT_COLOR, alpha=0.55,
+    )
 
     if output_dir is not None:
         _out = Path(output_dir) / "cd45_count_raw.png"
@@ -1068,7 +1157,14 @@ def _apply_gating_combined(
                 "Gate 3 — CD45 [%s] ASYMÉTRIQUE (GMM combiné, patho uniquement)", mode
             )
             if mode == "auto":
-                mask_cd45_full = AutoGating.auto_gate_cd45(X, var_names)
+                mask_cd45_full = AutoGating.auto_gate_cd45(
+                    X, var_names,
+                    kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
+                    kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
+                    kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
+                )
             else:
                 mask_cd45_full = PreGating.gate_cd45_positive(
                     X,
@@ -1083,7 +1179,14 @@ def _apply_gating_combined(
         else:
             _logger.info("Gate 3 — CD45 [%s] sur toutes les cellules", mode)
             if mode == "auto":
-                mask_cd45 = AutoGating.auto_gate_cd45(X, var_names)
+                mask_cd45 = AutoGating.auto_gate_cd45(
+                    X, var_names,
+                    kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
+                    kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
+                    kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
+                )
             else:
                 mask_cd45 = PreGating.gate_cd45_positive(
                     X,

@@ -1066,26 +1066,108 @@ class AutoGating:
         return mask
 
     @staticmethod
+    def _kde1d_seuil_pied_pic(
+        x_data: np.ndarray,
+        seuil_relatif: float = 0.05,
+        finesse: float = 0.6,
+        sigma_smooth: int = 10,
+        n_grid: int = 4000,
+    ):
+        """
+        Détection du seuil CD45 par KDE 1D + pied du pic (méthode vallée robuste).
+
+        Calcule la densité KDE sur les données log-normalisées, applique un lissage
+        gaussien, puis recule depuis le maximum de densité jusqu'à tomber sous
+        `seuil_relatif * max(densité)` — correspondant au pied du grand pic CD45+.
+
+        Comme fallback si aucun pied n'est trouvé, applique Otsu 1D sur histogramme
+        des données log-transformées pour maximiser la variance inter-classes.
+
+        Args:
+            x_data: Données 1D CD45 (déjà transformées logicle/arcsinh)
+            seuil_relatif: Fraction du maximum de densité définissant le pied (défaut 0.05 = 5%)
+            finesse: Facteur de finesse du bandwidth Silverman (0.3=très fin, 1.0=très lissé)
+            sigma_smooth: Sigma du lissage gaussien supplémentaire sur la courbe KDE
+            n_grid: Nombre de points de la grille d'évaluation KDE
+
+        Returns:
+            threshold: Seuil de séparation CD45- / CD45+ dans l'espace transformé
+            method_used: Nom de la méthode utilisée ("kde_pied_pic" ou "otsu_log")
+        """
+        from scipy.stats import gaussian_kde
+        from scipy.ndimage import gaussian_filter1d
+
+        n = len(x_data)
+        std = np.std(x_data)
+        iqr = np.percentile(x_data, 75) - np.percentile(x_data, 25)
+        bw = 0.9 * min(std, iqr / 1.34) * n ** (-1 / 5) * finesse
+        if std < 1e-12:
+            # Distribution dégénérée → fallback Otsu
+            bw = 0.1
+        kde = gaussian_kde(x_data, bw_method=bw / (std if std > 1e-12 else 1.0))
+        x_grid = np.linspace(x_data.min(), x_data.max(), n_grid)
+        densite = gaussian_filter1d(kde(x_grid), sigma=sigma_smooth)
+
+        seuil_abs = densite.max() * seuil_relatif
+        idx_max = np.argmax(densite)
+
+        # Recule depuis le pic max vers la gauche jusqu'à passer sous seuil_abs
+        for i in range(idx_max, 0, -1):
+            if densite[i] < seuil_abs:
+                return float(x_grid[i]), "kde_pied_pic"
+
+        # Fallback : Otsu 1D sur histogramme log-normalisé
+        # Les données sont supposées déjà dans l'espace log (logicle/arcsinh) —
+        # on normalise entre 0 et 1 pour un Otsu stable.
+        x_norm = (x_data - x_data.min()) / (x_data.max() - x_data.min() + 1e-12)
+        counts, bin_edges = np.histogram(x_norm, bins=512)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        total = counts.sum()
+        best_var, best_t_norm = 0.0, bin_centers[len(bin_centers) // 2]
+        for t in range(1, len(counts)):
+            w0 = counts[:t].sum() / total
+            w1 = counts[t:].sum() / total
+            if w0 == 0 or w1 == 0:
+                continue
+            mu0 = (counts[:t] * bin_centers[:t]).sum() / (counts[:t].sum() + 1e-12)
+            mu1 = (counts[t:] * bin_centers[t:]).sum() / (counts[t:].sum() + 1e-12)
+            var_inter = w0 * w1 * (mu0 - mu1) ** 2
+            if var_inter > best_var:
+                best_var = var_inter
+                best_t_norm = bin_centers[t]
+        # Dénormaliser vers l'espace original
+        threshold_otsu = best_t_norm * (x_data.max() - x_data.min()) + x_data.min()
+        return float(threshold_otsu), "otsu_log_fallback"
+
+    @staticmethod
     def auto_gate_cd45(
         X: np.ndarray,
         var_names: List[str],
-        n_components: int = 2,
-        uniform_gating: bool = False,
+        kde_seuil_relatif: float = 0.05,
+        kde_finesse: float = 0.6,
+        kde_sigma_smooth: int = 10,
+        kde_n_grid: int = 4000,
         threshold_percentile: float = 5.0,
     ) -> np.ndarray:
         """
-        Gate CD45+ adaptatif par GMM 1D.
+        Gate CD45+ par KDE 1D — méthode pied du pic (vallée robuste).
 
-        Trouve automatiquement le creux bimodal entre CD45- et CD45+
-        au lieu d'un percentile fixe. Le GMM modélise la distribution
-        bimodale et assigne chaque événement à la population la plus probable.
+        Utilise la densité KDE 1D sur les données transformées (logicle/arcsinh).
+        Recule depuis le maximum de densité jusqu'à trouver le pied du grand pic CD45+
+        (seuil = seuil_relatif × max(densité)). Fallback automatique sur Otsu 1D
+        (histogramme log-normalisé) si aucun pied n'est détecté.
+
+        Méthode recommandée pour les données de moelle avec distribution asymétrique
+        (CD45+ dominant, CD45- minoritaire), plus robuste que le GMM bimodal.
 
         Args:
-            X: Matrice des données
+            X: Matrice des données (transformées)
             var_names: Noms des marqueurs
-            n_components: Nombre de composantes GMM (2 = CD45- / CD45+)
-            uniform_gating: Si True, applique un seuil soft (percentile)
-            threshold_percentile: Percentile pour le seuil soft CD45
+            kde_seuil_relatif: Fraction du max densité pour détecter le pied (0.05 = 5%)
+            kde_finesse: Facteur bandwidth Silverman (0.3=très fin → 1.0=très lissé)
+            kde_sigma_smooth: Lissage gaussien supplémentaire sur la courbe KDE (sigma)
+            kde_n_grid: Résolution de la grille KDE
+            threshold_percentile: Percentile fallback ultime si KDE/Otsu échouent
 
         Returns:
             Masque booléen (True = CD45+, False = CD45-)
@@ -1106,68 +1188,36 @@ class AutoGating:
             _logger.warning("[!] Pas assez de données valides pour auto-gate CD45+")
             return np.ones(n_cells, dtype=bool)
 
-        # Mode uniform_gating: seuil soft par percentile (pas de GMM)
-        if uniform_gating:
-            threshold = np.nanpercentile(cd45[valid], threshold_percentile)
-            mask = np.zeros(n_cells, dtype=bool)
-            mask[valid] = cd45[valid] > threshold
-            n_pos = mask.sum()
-            _logger.info(
-                "   [Uniform-CD45] Seuil soft: %.0f (percentile %.0f%%)",
-                threshold,
-                threshold_percentile,
-            )
-            _logger.info(
-                "   [Uniform-CD45] CD45+ identifiés: %d (%.1f%%)",
-                n_pos,
-                n_pos / valid.sum() * 100,
-            )
+        cd45_valid = cd45[valid]
 
-            gate_result = GateResult(
-                mask=mask,
-                n_kept=int(n_pos),
-                n_total=int(valid.sum()),
-                method="gmm_cd45_uniform",
-                gate_name="G3_cd45",
-                details={
-                    "threshold": float(threshold),
-                    "percentile": threshold_percentile,
-                    "fallback": False,
-                },
-            )
-            gating_reports.append(gate_result)
-            log_gating_event(
-                "cd45",
-                "uniform_percentile",
-                "success",
-                {"threshold": float(threshold), "n_pos": int(n_pos)},
-            )
-            return mask
-
-        # GMM pour séparer CD45- et CD45+
         try:
-            gmm = AutoGating.safe_fit_gmm(
-                cd45[valid].reshape(-1, 1), n_components=n_components, n_init=3
+            threshold, method_used = AutoGating._kde1d_seuil_pied_pic(
+                cd45_valid,
+                seuil_relatif=kde_seuil_relatif,
+                finesse=kde_finesse,
+                sigma_smooth=kde_sigma_smooth,
+                n_grid=kde_n_grid,
             )
-        except RuntimeError as e:
-            warn_msg = f"GMM CD45 échoué: {e} — fallback percentile"
+        except Exception as e:
+            warn_msg = f"KDE CD45 échoué: {e} — fallback percentile"
             _logger.warning("   [!] %s", warn_msg)
             log_gating_event(
                 "cd45",
-                "gmm_fallback_percentile",
+                "kde_fallback_percentile",
                 "fallback",
                 {"error": str(e)},
                 warn_msg,
             )
-            threshold = np.nanpercentile(cd45[valid], threshold_percentile)
+            threshold = np.nanpercentile(cd45_valid, threshold_percentile)
+            method_used = "percentile_fallback"
             mask = np.zeros(n_cells, dtype=bool)
-            mask[valid] = cd45[valid] > threshold
+            mask[valid] = cd45_valid > threshold
 
             gate_result = GateResult(
                 mask=mask,
                 n_kept=int(mask.sum()),
                 n_total=int(valid.sum()),
-                method="gmm_cd45_fallback_percentile",
+                method="kde_cd45_fallback_percentile",
                 gate_name="G3_cd45",
                 details={"threshold": float(threshold), "fallback": True},
                 warnings=[warn_msg],
@@ -1175,53 +1225,42 @@ class AutoGating:
             gating_reports.append(gate_result)
             return mask
 
-        labels = gmm.predict(cd45[valid].reshape(-1, 1))
-        means = gmm.means_.flatten()
-
-        # CD45+ = composant avec la moyenne la plus élevée
-        pos_component = np.argmax(means)
-
-        # Calculer le seuil approximatif (intersection des 2 gaussiennes)
-        sorted_means = np.sort(means)
-        stds = np.sqrt(gmm.covariances_.flatten())
-        sorted_stds = stds[np.argsort(means)]
-        threshold_approx = (
-            sorted_means[0] * sorted_stds[1] + sorted_means[1] * sorted_stds[0]
-        ) / (sorted_stds[0] + sorted_stds[1])
-
         mask = np.zeros(n_cells, dtype=bool)
-        mask[valid] = labels == pos_component
-
+        mask[valid] = cd45_valid >= threshold
         n_pos = mask.sum()
-        _logger.info("   [Auto-GMM] CD45: %d composantes, μ=%s", n_components, means.round(0))
+
         _logger.info(
-            "   [Auto-GMM] Seuil adaptatif ≈ %.0f (creux entre populations)", threshold_approx
+            "   [KDE-CD45] Méthode: %s | seuil_relatif=%.3f | finesse=%.2f",
+            method_used, kde_seuil_relatif, kde_finesse,
         )
         _logger.info(
-            "   [Auto-GMM] CD45+ identifiés: %d (%.1f%%)", n_pos, n_pos / valid.sum() * 100
+            "   [KDE-CD45] Seuil adaptatif = %.4f  →  CD45+ : %d (%.1f%%)",
+            threshold, n_pos, n_pos / valid.sum() * 100,
         )
 
         gate_result = GateResult(
             mask=mask,
             n_kept=int(n_pos),
             n_total=int(valid.sum()),
-            method="gmm_cd45",
+            method=f"kde_cd45_{method_used}",
             gate_name="G3_cd45",
             details={
-                "means": means.tolist(),
-                "threshold": float(threshold_approx),
-                "n_components": int(n_components),
-                "fallback": False,
+                "threshold": float(threshold),
+                "method_used": method_used,
+                "kde_seuil_relatif": kde_seuil_relatif,
+                "kde_finesse": kde_finesse,
+                "kde_sigma_smooth": kde_sigma_smooth,
+                "fallback": method_used != "kde_pied_pic",
             },
         )
         gating_reports.append(gate_result)
         log_gating_event(
             "cd45",
-            "gmm",
+            f"kde_{method_used}",
             "success",
             {
-                "means": means.tolist(),
-                "threshold": float(threshold_approx),
+                "threshold": float(threshold),
+                "method_used": method_used,
                 "n_pos": int(n_pos),
             },
         )
