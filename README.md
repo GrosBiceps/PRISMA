@@ -10,7 +10,7 @@ Elle couvre l'intégralité de la chaîne d'analyse : de l'importation de millio
 
 Récemment refondue pour des performances "Entreprise", l'application est capable de traiter un pipeline complet sur plus de **2 millions de cellules en moins de 90 secondes sur un processeur standard (CPU)**, sans figer l'interface.
 
-![Aperçu de l'interface](https://via.placeholder.com/800x450.png?text=Insérer+une+capture+d'écran+de+l'UI+Catppuccin+ici) *(Remplacer par une capture d'écran du nouveau thème Catppuccin)*
+![Aperçu de l'interface](BIENTOT)
 
 ---
 
