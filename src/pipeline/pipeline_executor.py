@@ -155,6 +155,15 @@ class FlowSOMPipeline:
             # Si un fichier patho unique est spécifié (mode batch ou run simple),
             # on utilise son stem pour nommer les rapports et structurer le dossier.
             _single_patho = getattr(config.paths, "patho_single_file", None)
+
+            # Mode unitaire : patho_single_file non défini → déduire depuis patho_folder
+            if not _single_patho:
+                _patho_folder_path = Path(getattr(config.paths, "patho_folder", "") or "")
+                if _patho_folder_path.exists():
+                    _patho_files_found = get_fcs_files(_patho_folder_path)
+                    if len(_patho_files_found) == 1:
+                        _single_patho = str(_patho_files_found[0])
+
             _patho_stem = Path(_single_patho).stem if _single_patho else None
 
             # Extraire la date du fichier FCS pathologique
@@ -254,6 +263,19 @@ class FlowSOMPipeline:
                 mfi_raw,
                 index=[f"MC{i}" for i in unique_mc],
                 columns=selected_markers[: mfi_raw.shape[1]],
+            )
+
+            # MFI médiane par nœud SOM — même logique que plot_cluster_radar_mrd
+            # Utilisée pour les spider plots de l'accueil (cohérence avec le radar HTML)
+            _node_mfi_rows = {}
+            for _nid in np.unique(clustering):
+                _mask = clustering == _nid
+                if _mask.sum() > 0:
+                    _node_mfi_rows[int(_nid)] = np.median(
+                        X_stacked[_mask], axis=0
+                    ).astype(float)
+            node_mfi_matrix = pd.DataFrame.from_dict(
+                _node_mfi_rows, orient="index", columns=selected_markers
             )
 
             # ── Étape 5: Metrics de clustering ────────────────────────────────
@@ -929,6 +951,7 @@ class FlowSOMPipeline:
                         files_data=files_data,
                         export_paths=export_paths,
                         patho_info=_patho_info,
+                        ransac_summary=dict(ransac_scatter_data) if ransac_scatter_data else None,
                     )
                     if html_path:
                         export_paths["html_report"] = html_path
@@ -966,6 +989,7 @@ class FlowSOMPipeline:
                             files_data=files_data,
                             export_paths=export_paths,
                             patho_info=_patho_info,
+                            ransac_summary=dict(ransac_scatter_data) if ransac_scatter_data else None,
                         )
                         if pdf_path:
                             export_paths["pdf_report"] = pdf_path
@@ -994,6 +1018,7 @@ class FlowSOMPipeline:
             result = PipelineResult(
                 data=df_cells,
                 mfi_matrix=mfi_matrix,
+                node_mfi_matrix=node_mfi_matrix,
                 gating_report=[e.to_dict() for e in self._gating_logger.events],
                 clustering_metrics=metrics,
                 output_files=export_paths,

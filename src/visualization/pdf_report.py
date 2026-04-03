@@ -592,6 +592,40 @@ def _section_exports(styles: dict, export_paths: Dict[str, str],
     return items
 
 
+def _section_ransac(styles: dict, ransac_summary: Dict[str, Any],
+                    num: int = 7) -> List[Any]:
+    """Section résumé des modèles RANSAC (singlets) avec coefficients."""
+    items: List[Any] = [_section_header("Résumé des Modèles RANSAC (Singlets)", num, styles),
+                        Spacer(1, 4)]
+    if _RL:
+        items.append(Paragraph(
+            "Régression linéaire robuste FSC-H → FSC-A par fichier. "
+            "R² mesure la qualité de la corrélation (objectif > 0.85).",
+            styles["small"],
+        ))
+        items.append(Spacer(1, 6))
+
+    rows = []
+    for fname, rdata in ransac_summary.items():
+        r2_val = rdata.get("r2", float("nan"))
+        slope_val = rdata.get("slope", float("nan"))
+        intercept_val = rdata.get("intercept", float("nan"))
+        pct_val = rdata.get("pct_singlets", rdata.get("pct", None))
+        r2_str = f"{r2_val:.4f}" if isinstance(r2_val, float) and r2_val == r2_val else "N/A"
+        slope_str = f"{slope_val:.4f}" if isinstance(slope_val, float) and slope_val == slope_val else "N/A"
+        intercept_str = f"{intercept_val:.4f}" if isinstance(intercept_val, float) and intercept_val == intercept_val else "N/A"
+        pct_str = f"{pct_val:.1f}%" if pct_val is not None else "N/A"
+        rows.append([str(fname), slope_str, intercept_str, r2_str, pct_str])
+
+    items.append(_data_table(
+        ["Fichier", "Pente (slope)", "Intercept", "R² (corrélation)", "% Singlets"],
+        rows,
+        styles,
+        col_widths=[190, 70, 70, 80, 71],
+    ))
+    return items
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Point d'entrée principal
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -612,6 +646,7 @@ def generate_pdf_report(
     timestamp: str = "",
     patho_info: Optional[Dict[str, str]] = None,
     dpi_mpl: int = 100,
+    ransac_summary: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Génère un rapport PDF A4 complet reproduisant le rapport HTML.
@@ -703,6 +738,8 @@ def generate_pdf_report(
                                    dpi_mpl=dpi_mpl))
     if export_paths:
         story.extend(_section_exports(styles, export_paths, num=6))
+    if ransac_summary:
+        story.extend(_section_ransac(styles, ransac_summary, num=7))
 
     # ── Document avec templates portrait + paysage ────────────────────────────
     doc = BaseDocTemplate(

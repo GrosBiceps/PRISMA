@@ -649,7 +649,9 @@ def preprocess_combined(
     # ── Plot KDE CD45 sur données transformées (logicle/arcsinh) ─────────────
     # Ce plot doit être généré APRÈS la transformation pour afficher le CD45
     # dans l'espace logicle (comme dans le notebook .ipynb), et non en linéaire.
-    if gating_plot_dir is not None and gate_masks:
+    # EXPORT SYSTÉMATIQUE : le KDE CD45 est toujours exporté, même si CD45 n'est
+    # pas sélectionné pour le tri cellulaire (gate_masks peut ne pas contenir G3_cd45).
+    if gating_plot_dir is not None:
         try:
             from flowsom_pipeline_pro.src.visualization.gating_plots import (
                 plot_cd45_kde_qc as _plot_cd45_kde,
@@ -658,8 +660,20 @@ def preprocess_combined(
             _cd45_idx = _PG.find_marker_index(
                 var_names, ["CD45", "CD45-PECY5", "CD45-PC5"]
             )
-            _mask_g3 = gate_masks.get("G3_cd45", gate_masks.get("G3", gate_masks.get("cd45")))
-            if _cd45_idx is not None and _mask_g3 is not None:
+            if _cd45_idx is not None:
+                # Récupérer le masque G3 depuis gate_masks si disponible,
+                # sinon construire un masque universel (toutes les cellules = CD45+)
+                # pour garantir l'export du KDE même sans gate CD45 active.
+                _mask_g3 = gate_masks.get(
+                    "G3_cd45", gate_masks.get("G3", gate_masks.get("cd45"))
+                )
+                if _mask_g3 is None:
+                    import numpy as _np
+                    _mask_g3 = _np.ones(X_for_plot.shape[0], dtype=bool)
+                    _logger.info(
+                        "Plot KDE CD45 : G3_cd45 absent de gate_masks — "
+                        "export forcé avec masque universel (toutes cellules)"
+                    )
                 _fig_kde_cd45, _, _, _ = _plot_cd45_kde(
                     cd45_data=X_for_plot[:, _cd45_idx],
                     mask_cd45=_mask_g3,

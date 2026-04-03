@@ -378,6 +378,7 @@ class ExportService:
         export_paths: Optional[Dict[str, str]] = None,
         self_contained: bool = True,
         patho_info: Optional[Dict[str, str]] = None,
+        ransac_summary: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         Génère le rapport HTML complet self-contained.
@@ -425,6 +426,7 @@ class ExportService:
             self_contained=self_contained,
             patho_info=_patho_info,
             dpi_mpl=_html_dpi_mpl,
+            ransac_summary=ransac_summary,
         )
 
         return str(html_path) if ok else None
@@ -443,6 +445,7 @@ class ExportService:
         files_data: Optional[List[Dict[str, Any]]] = None,
         export_paths: Optional[Dict[str, str]] = None,
         patho_info: Optional[Dict[str, str]] = None,
+        ransac_summary: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         Génère le rapport PDF A4 complet (même contenu que le HTML).
@@ -481,5 +484,6 @@ class ExportService:
             timestamp=datetime.now().strftime("%d/%m/%Y %H:%M"),
             patho_info=_patho_info,
             dpi_mpl=_pdf_dpi_mpl,
+            ransac_summary=ransac_summary,
         )
 

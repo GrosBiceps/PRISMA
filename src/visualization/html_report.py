@@ -223,6 +223,7 @@ def generate_html_report(
     self_contained: bool = True,
     patho_info: Optional[Dict[str, str]] = None,
     dpi_mpl: int = 100,
+    ransac_summary: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Génère un rapport HTML complet avec toutes les visualisations.
@@ -452,6 +453,49 @@ def generate_html_report(
         else ""
     )
 
+    # ── Section résumé RANSAC ─────────────────────────────────────────────────
+    _ransac_section = ""
+    _toc_ransac = ""
+    if ransac_summary:
+        ransac_rows = ""
+        for fname, rdata in ransac_summary.items():
+            r2_val = rdata.get("r2", float("nan"))
+            slope_val = rdata.get("slope", float("nan"))
+            intercept_val = rdata.get("intercept", float("nan"))
+            pct_val = rdata.get("pct_singlets", rdata.get("pct", None))
+            r2_str = f"{r2_val:.4f}" if isinstance(r2_val, float) and r2_val == r2_val else "N/A"
+            slope_str = f"{slope_val:.4f}" if isinstance(slope_val, float) and slope_val == slope_val else "N/A"
+            intercept_str = f"{intercept_val:.4f}" if isinstance(intercept_val, float) and intercept_val == intercept_val else "N/A"
+            pct_str = f"{pct_val:.1f}%" if pct_val is not None else "N/A"
+            ransac_rows += (
+                f"<tr>"
+                f"<td style='font-size:0.85em; font-family:monospace;'>{fname}</td>"
+                f'<td style="text-align:right;">{slope_str}</td>'
+                f'<td style="text-align:right;">{intercept_str}</td>'
+                f'<td style="text-align:right; font-weight:bold; color:var(--primary);">{r2_str}</td>'
+                f'<td style="text-align:right;">{pct_str}</td>'
+                f"</tr>\n"
+            )
+        _ransac_section = f"""
+<div class="section" id="ransac">
+    <h2>8. Résumé des Modèles RANSAC (Singlets)</h2>
+    <p style="color:var(--text-light); margin-bottom:15px;">
+        Régression linéaire robuste FSC-H → FSC-A par fichier.
+        R² mesure la qualité de la corrélation (objectif &gt; 0.85).
+    </p>
+    <table>
+        <tr>
+            <th>Fichier</th>
+            <th>Pente (slope)</th>
+            <th>Intercept</th>
+            <th>R² (corrélation)</th>
+            <th>% Singlets</th>
+        </tr>
+        {ransac_rows}
+    </table>
+</div>"""
+        _toc_ransac = '\n        <li><a href="#ransac">8. Résumé RANSAC (Singlets)</a></li>'
+
     html = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -484,7 +528,7 @@ def generate_html_report(
         <li><a href="#markers">3. Marqueurs utilisés</a></li>
         <li><a href="#metaclusters">4. Métaclusters</a></li>
         <li><a href="#plotly-viz">5. Visualisations interactives</a></li>
-        <li><a href="#static-viz">6. Visualisations statiques</a></li>{_toc_exports}
+        <li><a href="#static-viz">6. Visualisations statiques</a></li>{_toc_exports}{_toc_ransac}
     </ul>
 </div>
 
@@ -544,6 +588,8 @@ def generate_html_report(
 </div>
 
 {_exports_section}
+
+{_ransac_section}
 
 </div>
 
