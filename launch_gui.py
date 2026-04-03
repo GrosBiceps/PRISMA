@@ -46,6 +46,8 @@ for _noisy in (
     "kaleido.scopes.chromium",
     "chromote",
     "pyppeteer",
+    "matplotlib",
+    "matplotlib.font_manager",
 ):
     _logging.getLogger(_noisy).setLevel(_logging.WARNING)
 

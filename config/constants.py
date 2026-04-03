@@ -64,7 +64,7 @@ DEFAULT_MAX_CELLS_TOTAL: int = 1_000_000
 # ---------------------------------------------------------------------------
 # GMM / AutoGating
 # ---------------------------------------------------------------------------
-GMM_MAX_SAMPLES: int = 200_000
+GMM_MAX_SAMPLES: int = 50_000
 RANSAC_R2_THRESHOLD: float = 0.85
 RANSAC_MAD_FACTOR: float = 3.0
 

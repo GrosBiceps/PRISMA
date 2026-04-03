@@ -61,6 +61,7 @@ class PipelineResult:
     mrd_result: Optional[Any] = None          # MRDResult (§8) — pour synthèse batch
     patho_stem: Optional[str] = None          # Stem du fichier patho traité (batch)
     patho_date: Optional[str] = None         # Date du prélèvement extraite du FCS (format YYYY-MM-DD)
+    node_mfi_matrix: Optional[pd.DataFrame] = None  # MFI médiane par nœud SOM (index=node_id int, cols=markers)
 
     # ------------------------------------------------------------------
     # Accès

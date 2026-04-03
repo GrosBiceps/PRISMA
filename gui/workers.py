@@ -9,6 +9,7 @@ Capture les logs via un handler logging dédié et les transmet en temps réel.
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -52,7 +53,16 @@ _PIPELINE_PROGRESS_MAP: List[Tuple[str, int]] = [
 
 
 class LogCapture(logging.Handler):
-    """Handler logging qui émet chaque message via un signal Qt et infère la progression."""
+    """Handler logging qui émet chaque message via un signal Qt et infère la progression.
+
+    Optimisations :
+    - Le scan des patterns de progression est ignoré pour les messages DEBUG
+      (très fréquents pendant le prétraitement) → réduit le overhead CPU.
+    - Throttling : le signal progress n'est émis qu'une fois par seconde maximum
+      pour éviter de saturer la queue d'événements Qt.
+    """
+
+    _PROGRESS_THROTTLE_S = 1.0  # émission progress au plus toutes les 1 s
 
     def __init__(
         self, log_signal: pyqtSignal, progress_signal: Optional[pyqtSignal] = None
@@ -61,6 +71,7 @@ class LogCapture(logging.Handler):
         self._log_signal = log_signal
         self._progress_signal = progress_signal
         self._last_progress = 0
+        self._last_progress_time: float = 0.0
         self.setFormatter(
             logging.Formatter(
                 "[%(asctime)s] %(levelname)-8s %(message)s",
@@ -72,14 +83,18 @@ class LogCapture(logging.Handler):
         try:
             msg = self.format(record)
             self._log_signal.emit(msg)
-            # Infère la progression depuis le contenu du message
-            if self._progress_signal is not None:
-                raw_msg = record.getMessage()
-                for pattern, pct in _PIPELINE_PROGRESS_MAP:
-                    if pattern in raw_msg and pct > self._last_progress:
-                        self._last_progress = pct
-                        self._progress_signal.emit(pct)
-                        break
+            # Infère la progression uniquement sur les messages INFO et au-dessus
+            # (les DEBUG sont trop fréquents et ne contiennent jamais de jalons)
+            if self._progress_signal is not None and record.levelno >= logging.INFO:
+                now = time.monotonic()
+                if now - self._last_progress_time >= self._PROGRESS_THROTTLE_S:
+                    raw_msg = record.getMessage()
+                    for pattern, pct in _PIPELINE_PROGRESS_MAP:
+                        if pattern in raw_msg and pct > self._last_progress:
+                            self._last_progress = pct
+                            self._last_progress_time = now
+                            self._progress_signal.emit(pct)
+                            break
         except Exception:
             pass
 

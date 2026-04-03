@@ -103,7 +103,7 @@ class PregateConfig:
     kde_cd45_seuil_relatif: float = 0.05   # Fraction du max densité pour le pied du pic
     kde_cd45_finesse: float = 0.6          # Facteur bandwidth Silverman
     kde_cd45_sigma_smooth: int = 10        # Lissage gaussien sur la courbe KDE (sigma)
-    kde_cd45_n_grid: int = 4000            # Résolution de la grille KDE
+    kde_cd45_n_grid: int = 1000            # Résolution de la grille KDE
 
 
 @dataclass

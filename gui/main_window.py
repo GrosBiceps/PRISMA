@@ -68,18 +68,13 @@ matplotlib.use("Qt5Agg")
 
 from flowsom_pipeline_pro.gui.styles import STYLESHEET, COLORS
 from flowsom_pipeline_pro.gui.workers import PipelineWorker, SpiderPlotWorker
+from flowsom_pipeline_pro.gui.tabs.home_tab import HomeTab
 
-# QWebEngineView pour les visualisations Plotly HTML interactives
-try:
-    from PyQt5.QtWebEngineWidgets import QWebEngineView
-
-    _WEBENGINE = True
-except ImportError:
-    _WEBENGINE = False
-
-# Flag d'utilisation effective : peut être mis à False sur Win10 depuis main()
-# avant la création de QApplication pour bypasser Chromium entièrement.
-_WEBENGINE_ACTIVE = _WEBENGINE
+# QWebEngineView désactivé : les postes de travail (Windows 10) n'ont pas
+# d'accélération OpenGL compatible Chromium/DWM.
+# Toutes les figures interactives (.html) s'ouvrent dans le navigateur système.
+_WEBENGINE = False
+_WEBENGINE_ACTIVE = False
 
 # Chemin par défaut du YAML
 # En mode .exe (onedir) : config/ est dans le même dossier que l'exe.
@@ -255,12 +250,13 @@ class FlowSomAnalyzerPro(QMainWindow):
         right_layout.setSpacing(8)
 
         self.tabs = QTabWidget()
-        self._build_viz_tab()
-        self._build_pregate_tab()
-        self._build_clusters_tab()
-        self._build_results_tab()
-        self._build_logs_tab()
-        self._build_fcs_viewer_tab()
+        self._build_home_tab()       # index 0 — Accueil MRD
+        self._build_viz_tab()        # index 1
+        self._build_pregate_tab()    # index 2
+        self._build_clusters_tab()   # index 3
+        self._build_results_tab()    # index 4
+        self._build_logs_tab()       # index 5
+        self._build_fcs_viewer_tab() # index 6
         right_layout.addWidget(self.tabs)
 
         splitter.addWidget(right_panel)
@@ -704,6 +700,12 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         layout.addWidget(group)
 
+    # ── Onglet Accueil MRD ────────────────────────────────────────────
+
+    def _build_home_tab(self) -> None:
+        self._home_tab = HomeTab()
+        self.tabs.addTab(self._home_tab, "Accueil MRD")
+
     # ── Onglet Visualisation ───────────────────────────────────────────
 
     def _build_viz_tab(self) -> None:
@@ -748,10 +750,9 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         layout.addLayout(selector_layout)
 
-        # Zone empilée : canvas matplotlib / QWebEngineView
+        # Canvas PNG + toolbar (pas de QWebEngineView : OpenGL incompatible sur Win10)
         self._viz_stack = QStackedWidget()
 
-        # Page 0 : canvas PNG + toolbar
         png_widget = QWidget()
         png_layout = QVBoxLayout(png_widget)
         png_layout.setContentsMargins(0, 0, 0, 0)
@@ -764,26 +765,15 @@ class FlowSomAnalyzerPro(QMainWindow):
         png_layout.addWidget(self.canvas, 1)
         self._viz_stack.addWidget(png_widget)
 
-        # Page 1 : QWebEngineView ou placeholder
-        if _WEBENGINE_ACTIVE:
-            self._web_view = QWebEngineView()
-            # Corrige le fond blanc/transparent dû à QWidget{background:transparent} dans le QSS
-            self._web_view.page().setBackgroundColor(QColor(30, 30, 46))  # #1e1e2e
-            self._viz_stack.addWidget(self._web_view)
-        else:
-            _reason = (
-                "Figures interactives ouvertes automatiquement dans le navigateur.\n"
-                "(Mode navigateur actif sur Windows 10 pour éviter les conflits GPU/DWM)"
-                if _WEBENGINE
-                else "QWebEngineView non disponible.\n"
-                "Installez PyQtWebEngine : pip install PyQtWebEngine\n"
-                "Utilisez le bouton 'Ouvrir dans le navigateur' pour les figures interactives."
-            )
-            html_placeholder = QLabel(_reason)
-            html_placeholder.setAlignment(Qt.AlignCenter)
-            html_placeholder.setObjectName("subtitleLabel")
-            self._web_view = None
-            self._viz_stack.addWidget(html_placeholder)
+        # Page 1 : placeholder texte (figures HTML → navigateur via bouton)
+        html_placeholder = QLabel(
+            "Figures interactives (.html)\n"
+            "Cliquez sur  'Ouvrir dans le navigateur'  pour les afficher."
+        )
+        html_placeholder.setAlignment(Qt.AlignCenter)
+        html_placeholder.setObjectName("subtitleLabel")
+        self._web_view = None
+        self._viz_stack.addWidget(html_placeholder)
 
         layout.addWidget(self._viz_stack, 1)
         self.tabs.addTab(tab, "Visualisation")
@@ -796,47 +786,22 @@ class FlowSomAnalyzerPro(QMainWindow):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(6)
 
-        # Tableau des évènements de gating
-        lbl = QLabel("Rapport de Prégating")
-        lbl.setObjectName("sectionLabel")
-        layout.addWidget(lbl)
-
-        self.gate_table = QTableWidget()
-        self.gate_table.setColumnCount(6)
-        self.gate_table.setHorizontalHeaderLabels(
-            [
-                "Gate",
-                "Fichier",
-                "Cellules avant",
-                "Cellules après",
-                "% conservé",
-                "Mode",
-            ]
-        )
-        self.gate_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.gate_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.gate_table.setMaximumHeight(250)
-        layout.addWidget(self.gate_table)
-
-        # Sélecteur de figure de gating
-        gate_selector = QHBoxLayout()
-        gate_selector.addWidget(QLabel("Figure de gating :"))
+        # ── Sélecteur de figure (toutes les représentations disponibles) ──
+        selector_row = QHBoxLayout()
+        selector_row.addWidget(QLabel("Figure :"))
         self.combo_gate_plot = DarkComboBox()
-        self.combo_gate_plot.addItems(
-            [
-                "Vue d'ensemble",
-                "Gate Débris",
-                "Gate Doublets",
-                "Gate CD45",
-                "Gate CD34+",
-            ]
-        )
         self.combo_gate_plot.currentIndexChanged.connect(self._on_gate_plot_changed)
-        gate_selector.addWidget(self.combo_gate_plot, 1)
-        layout.addLayout(gate_selector)
+        selector_row.addWidget(self.combo_gate_plot, 1)
 
-        # Canvas pour les figures de gating
-        self.gate_canvas = MatplotlibCanvas(tab, width=10, height=5)
+        btn_gate_browser = QPushButton("Ouvrir dans le navigateur")
+        btn_gate_browser.setObjectName("successBtn")
+        btn_gate_browser.clicked.connect(self._open_current_repr_browser)
+        selector_row.addWidget(btn_gate_browser)
+
+        layout.addLayout(selector_row)
+
+        # Canvas pour les figures
+        self.gate_canvas = MatplotlibCanvas(tab, width=10, height=6)
         gate_toolbar = NavigationToolbar(self.gate_canvas, tab)
         gate_toolbar.setStyleSheet(
             "background: rgba(49,50,68,0.8); border-radius: 8px; padding: 4px;"
@@ -844,17 +809,51 @@ class FlowSomAnalyzerPro(QMainWindow):
         layout.addWidget(gate_toolbar)
         layout.addWidget(self.gate_canvas, 1)
 
-        # Mapping nom combo → clé fichier attendue
+        # Tableau de gating (compact, repliable en bas)
+        lbl_gate = QLabel("Rapport de prégating")
+        lbl_gate.setObjectName("subtitleLabel")
+        layout.addWidget(lbl_gate)
+
+        self.gate_table = QTableWidget()
+        self.gate_table.setColumnCount(6)
+        self.gate_table.setHorizontalHeaderLabels(
+            ["Gate", "Fichier", "Cellules avant", "Cellules après", "% conservé", "Mode"]
+        )
+        self.gate_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.gate_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.gate_table.setMaximumHeight(180)
+        layout.addWidget(self.gate_table)
+
+        # Mapping nom combo → clés de fichiers possibles
+        # Ordre = ordre d'affichage dans le combo
         self._gate_plot_keys = {
-            "Vue d'ensemble": ["fig_overview", "overview"],
-            "Gate Débris": ["fig_gate_debris", "gate_debris", "debris"],
-            "Gate Doublets": ["fig_gate_singlets", "gate_singlets", "singlets"],
-            "Gate CD45": ["fig_gate_cd45", "gate_cd45", "cd45"],
-            "Gate CD34+": ["fig_gate_cd34", "gate_cd34", "cd34"],
+            # ── Figures de gating ──
+            "Prégating — Vue d'ensemble": ["fig_overview", "overview"],
+            "Prégating — Débris": ["fig_gate_debris", "gate_debris", "debris"],
+            "Prégating — Doublets": ["fig_gate_singlets", "gate_singlets", "singlets"],
+            "Prégating — CD45": ["fig_gate_cd45", "gate_cd45", "cd45"],
+            "Prégating — CD34+": ["fig_gate_cd34", "gate_cd34", "cd34"],
+            # ── Figures FlowSOM / visualisations ──
+            "Heatmap MFI": ["mfi_heatmap"],
+            "Distribution Métaclusters": ["metacluster_distribution"],
+            "UMAP": ["umap"],
+            "Star Chart FlowSOM": ["flowsom_star_chart"],
+            "Grille SOM statique": ["flowsom_som_grid"],
+            "MST Statique": ["mst_static"],
+            "Sankey Gating": ["sankey_global"],
+            "Radar Métaclusters": ["metacluster_radar"],
+            "% Cellules Patho / Cluster": ["patho_pct_per_cluster"],
+            "% Cellules / Cluster": ["cells_pct_per_cluster"],
+            "% Patho / Nœud SOM": ["patho_pct_per_som_node"],
+            "% Cellules / Nœud SOM": ["cells_pct_per_som_node"],
+            "Vue Combinée Nœuds SOM": ["som_node_combined"],
         }
         self._gate_plot_paths: Dict[str, str] = {}
 
-        self.tabs.addTab(tab, "Prégating")
+        # Peuple le combo avec toutes les entrées (les indisponibles seront ignorées au clic)
+        self.combo_gate_plot.addItems(list(self._gate_plot_keys.keys()))
+
+        self.tabs.addTab(tab, "Représentations")
 
     # ── Onglet Clusters ────────────────────────────────────────────────
 
@@ -939,36 +938,27 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.results_table.setMaximumHeight(280)
         layout.addWidget(self.results_table)
 
-        # Vue combinée nœuds SOM interactive
+        # Vue combinée nœuds SOM — affichée en PNG (export PDF), HTML dans navigateur
         hdr2 = QHBoxLayout()
-        lbl2 = QLabel("Vue Combinée Nœuds SOM (interactive)")
+        lbl2 = QLabel("Vue Combinée Nœuds SOM")
         lbl2.setObjectName("subtitleLabel")
         hdr2.addWidget(lbl2)
         hdr2.addStretch()
-        self.btn_open_combined = QPushButton("Ouvrir dans navigateur")
+        self.btn_open_combined = QPushButton("Ouvrir interactif dans navigateur")
         self.btn_open_combined.setObjectName("successBtn")
         self.btn_open_combined.setEnabled(False)
         self.btn_open_combined.clicked.connect(self._open_combined_html)
         hdr2.addWidget(self.btn_open_combined)
         layout.addLayout(hdr2)
 
-        if _WEBENGINE_ACTIVE:
-            self._results_web = QWebEngineView()
-            self._results_web.page().setBackgroundColor(QColor(30, 30, 46))  # #1e1e2e
-            layout.addWidget(self._results_web, 1)
-        else:
-            self._results_web = None
-            _reason2 = (
-                "Vue combinée ouverte automatiquement dans le navigateur.\n"
-                "(Mode navigateur actif sur Windows 10 pour éviter les conflits GPU/DWM)"
-                if _WEBENGINE
-                else "Installez PyQtWebEngine pour afficher la vue interactive ici.\n"
-                "Utilisez le bouton ci-dessus pour l'ouvrir dans le navigateur."
-            )
-            placeholder = QLabel(_reason2)
-            placeholder.setAlignment(Qt.AlignCenter)
-            placeholder.setObjectName("subtitleLabel")
-            layout.addWidget(placeholder, 1)
+        self._results_web = None  # pas de QWebEngineView (incompatible Win10 sans OpenGL)
+        self._combined_canvas = MatplotlibCanvas(tab, width=10, height=5)
+        self._combined_toolbar = NavigationToolbar(self._combined_canvas, tab)
+        self._combined_toolbar.setStyleSheet(
+            "background: rgba(49,50,68,0.8); border-radius: 8px; padding: 4px;"
+        )
+        layout.addWidget(self._combined_toolbar)
+        layout.addWidget(self._combined_canvas, 1)
 
         # Résumé textuel en bas
         self.txt_summary = QTextEdit()
@@ -1404,7 +1394,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
         self.log_output.clear()
-        self.tabs.setCurrentIndex(4)  # Onglet Logs (tab 4 après ajout prégating)
+        self.tabs.setCurrentIndex(5)  # Onglet Logs (index 5 avec onglet Accueil en 0)
 
         self._log("═══════════════════════════════════════════════")
         self._log(
@@ -1484,7 +1474,10 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._populate_cluster_list(result)
             self._populate_pregate_tab(result)
             self._load_output_plots(result)
-            self.tabs.setCurrentIndex(0)  # Onglet Visualisation
+            # Charge l'onglet Accueil MRD avec les résultats
+            method_used = self.combo_mrd_method.currentText()
+            self._home_tab.load_result(result, method_used)
+            self.tabs.setCurrentIndex(0)  # Onglet Accueil MRD
         else:
             self.statusBar().showMessage(" Pipeline terminé avec des erreurs")
             self._log("═══ Pipeline terminé avec des erreurs — vérifiez les logs ═══")
@@ -1953,9 +1946,12 @@ class FlowSomAnalyzerPro(QMainWindow):
             if "per_file" in str(file_path).lower():
                 continue
 
-            # Gating plots → prégating tab
+            # Gating plots → onglet Représentations
             if "gating" in str(file_path.parent).lower():
                 for label, keys in self._gate_plot_keys.items():
+                    # Seules les entrées "Prégating — *" ont des clés de gating
+                    if not label.startswith("Prégating"):
+                        continue
                     if any(
                         k.replace("fig_", "").replace("_", "") in fname.replace("_", "")
                         for k in keys
@@ -1979,17 +1975,43 @@ class FlowSomAnalyzerPro(QMainWindow):
         if hasattr(self, "btn_open_combined"):
             self.btn_open_combined.setEnabled(bool(self._combined_html_path))
 
-        # Charge la vue combinée dans QWebEngineView Résultats si disponible
-        if (
-            self._combined_html_path
-            and _WEBENGINE_ACTIVE
-            and self._results_web is not None
-        ):
-            from PyQt5.QtCore import QUrl
+        # Affiche le PNG combined_nodes dans le canvas Résultats (pas de WebEngine sur Win10)
+        combined_png = self._output_plot_paths.get("Vue Combinée Nœuds SOM")
+        if combined_png and Path(combined_png).exists() and combined_png.lower().endswith(".png"):
+            try:
+                import matplotlib.image as mpimg
+                self._combined_canvas.fig.clear()
+                ax = self._combined_canvas.fig.add_subplot(111)
+                ax.imshow(mpimg.imread(combined_png))
+                ax.axis("off")
+                self._combined_canvas.fig.patch.set_facecolor(COLORS["base"])
+                self._combined_canvas.fig.tight_layout(pad=0.3)
+                self._combined_canvas.draw()
+            except Exception as e:
+                self._log(f"Avertissement vue combinée PNG : {e}")
 
-            self._results_web.setUrl(QUrl.fromLocalFile(self._combined_html_path))
+        # Alimente _gate_plot_paths avec les figures FlowSOM disponibles
+        # (les figures de gating sont déjà dedans, on ajoute les autres)
+        _repr_mapping = {
+            "Heatmap MFI": "Heatmap MFI",
+            "Distribution Métaclusters": "Distribution Métaclusters",
+            "UMAP": "UMAP",
+            "Star Chart FlowSOM": "Star Chart FlowSOM",
+            "Grille SOM statique": "Grille SOM statique",
+            "MST Statique": "MST Statique",
+            "Sankey Gating": "Sankey Gating",
+            "Radar Métaclusters": "Radar Métaclusters",
+            "% Cellules Patho / Cluster": "% Cellules Patho / Cluster",
+            "% Cellules / Cluster": "% Cellules / Cluster",
+            "% Patho / Nœud SOM": "% Patho / Nœud SOM",
+            "% Cellules / Nœud SOM": "% Cellules / Nœud SOM",
+            "Vue Combinée Nœuds SOM": "Vue Combinée Nœuds SOM",
+        }
+        for repr_label, plot_label in _repr_mapping.items():
+            if plot_label in self._output_plot_paths and repr_label not in self._gate_plot_paths:
+                self._gate_plot_paths[repr_label] = self._output_plot_paths[plot_label]
 
-        # Charge les plots de gating dans le canvas prégating
+        # Charge la première figure disponible dans l'onglet Représentations
         self._on_gate_plot_changed(self.combo_gate_plot.currentIndex())
 
         # Rafraîchit la visualisation principale
@@ -2038,19 +2060,11 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _show_html_plot(self, path: str) -> None:
         """
-        Affiche un HTML interactif dans QWebEngineView (page 1) ou ouvre dans le navigateur."""
-        if _WEBENGINE_ACTIVE and self._web_view is not None:
-            from PyQt5.QtCore import QUrl
-
-            self._viz_stack.setCurrentIndex(1)
-            self._web_view.setUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
-        else:
-            # Win10 ou pas de WebEngine : ouvre dans le navigateur système
-            webbrowser.open(str(Path(path).resolve()))
-            self._viz_stack.setCurrentIndex(0)
-            self._show_placeholder(
-                "Figure interactive (.html)\nOuverture dans le navigateur système..."
-            )
+        Ouvre une figure HTML dans le navigateur système.
+        (QWebEngineView désactivé — incompatible OpenGL sur postes de travail Win10)
+        """
+        webbrowser.open(str(Path(path).resolve()))
+        self._viz_stack.setCurrentIndex(1)  # Affiche le placeholder
 
     def _show_placeholder(self, text: str) -> None:
         """
@@ -2110,48 +2124,60 @@ class FlowSomAnalyzerPro(QMainWindow):
             self.gate_table.setItem(i, 4, QTableWidgetItem(f"{float(pct):.1f}%"))
             self.gate_table.setItem(i, 5, QTableWidgetItem(str(mode)))
 
-        # Le chargement des plots de gating est fait dans _load_output_plots
-        self.tabs.setTabText(1, f"Prégating ({len(events)} gates)")
+        # Le chargement des plots est fait dans _load_output_plots
+        self.tabs.setTabText(2, f"Représentations ({len(events)} gates)")
 
     def _on_gate_plot_changed(self, index: int) -> None:
-        """
-        Affiche le plot de gating sélectionné dans gate_canvas."""
+        """Affiche la figure sélectionnée dans l'onglet Représentations."""
         label = self.combo_gate_plot.currentText()
-        path = (
-            self._gate_plot_paths.get(label)
-            if hasattr(self, "_gate_plot_paths")
-            else None
-        )
+        path = self._gate_plot_paths.get(label) if hasattr(self, "_gate_plot_paths") else None
 
         if path and Path(path).exists():
-            try:
-                import matplotlib.image as mpimg
-
-                self.gate_canvas.fig.clear()
-                ax = self.gate_canvas.fig.add_subplot(111)
-                img = mpimg.imread(path)
-                ax.imshow(img)
-                ax.axis("off")
-                self.gate_canvas.fig.patch.set_facecolor(COLORS["base"])
-                self.gate_canvas.fig.tight_layout(pad=0.3)
+            if path.lower().endswith(".html"):
+                # HTML interactif → navigateur + placeholder dans le canvas
+                webbrowser.open(str(Path(path).resolve()))
+                self.gate_canvas.clear_and_reset()
+                self.gate_canvas.axes.text(
+                    0.5, 0.5,
+                    f"Figure interactive (.html)\nOuverture dans le navigateur…\n\n{label}",
+                    transform=self.gate_canvas.axes.transAxes,
+                    ha="center", va="center", fontsize=11,
+                    color=COLORS["subtext"], style="italic",
+                )
+                self.gate_canvas.axes.axis("off")
                 self.gate_canvas.draw()
-            except Exception as e:
-                self._log(f"Erreur plot gating : {e}")
+            else:
+                try:
+                    import matplotlib.image as mpimg
+                    self.gate_canvas.fig.clear()
+                    ax = self.gate_canvas.fig.add_subplot(111)
+                    ax.imshow(mpimg.imread(path))
+                    ax.axis("off")
+                    self.gate_canvas.fig.patch.set_facecolor(COLORS["base"])
+                    self.gate_canvas.fig.tight_layout(pad=0.3)
+                    self.gate_canvas.draw()
+                except Exception as e:
+                    self._log(f"Erreur affichage représentation : {e}")
         else:
             self.gate_canvas.clear_and_reset()
             self.gate_canvas.axes.text(
-                0.5,
-                0.5,
-                "Figure de gating non disponible",
+                0.5, 0.5,
+                f"'{label}'\nnon disponible pour cette analyse",
                 transform=self.gate_canvas.axes.transAxes,
-                ha="center",
-                va="center",
-                fontsize=12,
-                color=COLORS["subtext"],
-                style="italic",
+                ha="center", va="center", fontsize=11,
+                color=COLORS["subtext"], style="italic",
             )
             self.gate_canvas.axes.axis("off")
             self.gate_canvas.draw()
+
+    def _open_current_repr_browser(self) -> None:
+        """Ouvre la représentation courante dans le navigateur."""
+        label = self.combo_gate_plot.currentText()
+        path = self._gate_plot_paths.get(label) if hasattr(self, "_gate_plot_paths") else None
+        if path and Path(path).exists():
+            webbrowser.open(str(Path(path).resolve()))
+        else:
+            QMessageBox.information(self, "Info", f"'{label}' non disponible.")
 
     # ==================================================================
     # LOGIQUE : Exports
@@ -2794,24 +2820,6 @@ class FlowSomAnalyzerPro(QMainWindow):
 
 
 def main() -> None:
-    import platform
-
-    global _WEBENGINE_ACTIVE
-
-    # ── Détection Win10 / Win11 ────────────────────────────────────────
-    # Sur Win10, QtWebEngine (Chromium embarqué) entre en conflit avec le
-    # DWM (Desktop Window Manager) : zones noires, crashes GPU, écran blanc.
-    # Solution définitive : ne pas instancier QWebEngineView du tout sur
-    # Win10 — tous les HTML s'ouvrent dans le navigateur système.
-    if platform.system() == "Windows":
-        win_ver = platform.version()  # ex. "10.0.19045" ou "10.0.22621"
-        build = int(win_ver.split(".")[-1]) if win_ver.count(".") >= 2 else 0
-        is_win10 = build < 22000  # build ≥ 22000 → Windows 11
-
-        if is_win10:
-            # Bypasse entièrement Chromium sur Win10 (pas de QWebEngineView instancié)
-            _WEBENGINE_ACTIVE = False
-
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = FlowSomAnalyzerPro()

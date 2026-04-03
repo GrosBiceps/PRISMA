@@ -318,7 +318,7 @@ def _apply_gating(
                     kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
                     kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
                     kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
-                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 1000),
                     threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
                 )
             else:
@@ -395,29 +395,50 @@ def preprocess_all_samples(
     gating_logger: Optional[GatingLogger] = None,
 ) -> List[FlowSample]:
     """
-    Prétraite une liste complète de FlowSample.
+    Prétraite une liste complète de FlowSample en parallèle (joblib).
+
+    Chaque échantillon est traité dans un worker indépendant pour exploiter
+    tous les cœurs disponibles. Le GatingLogger partagé est ignoré en mode
+    parallèle (chaque worker instancie le sien) pour éviter les race-conditions.
 
     Args:
         samples: Liste des échantillons à traiter.
         config: Configuration du pipeline.
-        gating_logger: Logger de gating partagé (optionnel).
+        gating_logger: Logger de gating partagé (optionnel, ignoré si n_jobs > 1).
 
     Returns:
-        Liste des échantillons prétraités (échecs ignorés).
+        Liste des échantillons prétraités (échecs ignorés), dans l'ordre d'origine.
     """
-    if gating_logger is None:
-        gating_logger = GatingLogger()
+    try:
+        from joblib import Parallel, delayed
+        _use_parallel = True
+    except ImportError:
+        _use_parallel = False
 
-    processed: List[FlowSample] = []
-    for sample in samples:
-        result = preprocess_sample(sample, config, gating_logger=gating_logger)
-        if result is not None:
-            processed.append(result)
+    n_samples = len(samples)
+
+    if _use_parallel and n_samples > 1:
+        # n_jobs=-1 → utilise tous les cœurs physiques disponibles
+        # prefer="threads" évite le coût de sérialisation pickle des gros arrays numpy
+        # (le GIL est libéré par numpy/scipy → vrai parallélisme)
+        results = Parallel(n_jobs=-1, prefer="threads", verbose=0)(
+            delayed(preprocess_sample)(s, config, GatingLogger())
+            for s in samples
+        )
+    else:
+        if gating_logger is None:
+            gating_logger = GatingLogger()
+        results = [
+            preprocess_sample(s, config, gating_logger=gating_logger)
+            for s in samples
+        ]
+
+    processed = [r for r in results if r is not None]
 
     _logger.info(
         "Prétraitement terminé: %d/%d échantillons",
         len(processed),
-        len(samples),
+        n_samples,
     )
     return processed
 
@@ -711,7 +732,7 @@ def preprocess_combined(
                     kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
                     kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
                     kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
-                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 1000),
                 )
                 if _fig_kde_cd45 is not None:
                     gating_figures["fig_kde_cd45"] = _fig_kde_cd45
@@ -787,7 +808,7 @@ def preprocess_combined(
                 kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
                 kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
                 kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
-                kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 1000),
             )
             if _cd45_fig is not None:
                 gating_figures["fig_cd45_count"] = _cd45_fig
@@ -810,7 +831,7 @@ def _count_cd45_raw(
     kde_seuil_relatif: float = 0.05,
     kde_finesse: float = 0.6,
     kde_sigma_smooth: int = 10,
-    kde_n_grid: int = 4000,
+    kde_n_grid: int = 1000,
 ) -> Optional[Any]:
     """
     Compte les événements CD45+ sur les données brutes (avant tout gating pipeline)
@@ -1235,7 +1256,7 @@ def _apply_gating_combined(
                     kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
                     kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
                     kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
-                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 1000),
                     threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
                 )
             else:
@@ -1257,7 +1278,7 @@ def _apply_gating_combined(
                     kde_seuil_relatif=getattr(pregate_cfg, "kde_cd45_seuil_relatif", 0.05),
                     kde_finesse=getattr(pregate_cfg, "kde_cd45_finesse", 0.6),
                     kde_sigma_smooth=getattr(pregate_cfg, "kde_cd45_sigma_smooth", 10),
-                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 4000),
+                    kde_n_grid=getattr(pregate_cfg, "kde_cd45_n_grid", 1000),
                     threshold_percentile=getattr(pregate_cfg, "cd45_threshold_percentile", 5.0),
                 )
             else:

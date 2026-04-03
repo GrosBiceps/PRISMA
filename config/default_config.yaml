@@ -116,7 +116,7 @@ normalize:
   method: "zscore"    # zscore | minmax | none
 
 markers:
-  exclude_scatter: false # true = exclure les paramètres de diffusion (FSC/SSC) des marqueurs
+  exclude_scatter: true # true = exclure les paramètres de diffusion (FSC/SSC) des marqueurs
   exclude_additional: [] # Liste de marqueurs supplémentaires à exclure (ex: ["Time", "Event_length"])
   keep_area_only: true    # Supprime les doublons -H (Height) ; garde -A (Area) + FSC/SSC/Time
   # Patterns toujours exclus du clustering FlowSOM (insensible à la casse)

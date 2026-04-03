@@ -326,7 +326,7 @@ def add_gate_rectangle(
 def save_figure(
     fig: "plt.Figure",
     output_path: str,
-    dpi: int = 150,
+    dpi: int = 100,
     tight: bool = True,
 ) -> None:
     """
@@ -335,7 +335,7 @@ def save_figure(
     Args:
         fig: Figure à sauvegarder.
         output_path: Chemin de sortie (PNG, PDF, SVG).
-        dpi: Résolution en DPI.
+        dpi: Résolution en DPI (100 par défaut — réduit le pic I/O disque de ~30%).
         tight: Appliquer tight_layout avant sauvegarde.
     """
     _require_matplotlib()

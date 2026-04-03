@@ -34,6 +34,20 @@ try:
 except ImportError:
     _PLOTLY_AVAILABLE = False
 
+# Cache module-level du bundle plotly.js (~3.5 MB) :
+# get_plotlyjs() lit et compresse le fichier à chaque appel.
+# En le mémorisant dès le premier appel on évite le re-chargement complet
+# pour chaque rapport généré dans la même session.
+_PLOTLYJS_CACHE: "Optional[str]" = None
+
+
+def _get_plotlyjs_cached() -> str:
+    """Retourne le bundle plotly.js en le chargeant au plus une fois par session."""
+    global _PLOTLYJS_CACHE
+    if _PLOTLYJS_CACHE is None:
+        _PLOTLYJS_CACHE = plotly.offline.get_plotlyjs()
+    return _PLOTLYJS_CACHE
+
 try:
     import matplotlib.figure
 
@@ -287,7 +301,7 @@ def generate_html_report(
 
     # ── Script Plotly.js ──────────────────────────────────────────────────
     if self_contained:
-        plotly_js = plotly.offline.get_plotlyjs()
+        plotly_js = _get_plotlyjs_cached()
         plotly_script = f'<script type="text/javascript">{plotly_js}</script>'
     else:
         plotly_script = (

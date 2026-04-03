@@ -126,6 +126,24 @@ class FlowSOMPipeline:
                 _logger.debug("Performance monitor non disponible: %s", _me)
                 _monitor = None
 
+        # ── Warm-up Matplotlib (charge le cache de polices une seule fois) ──────
+        # Sans ce warm-up, chaque plt.figure() dans les plots de gating
+        # déclenche un scan complet du système de polices → 30k logs findfont.
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as _plt_warmup
+            import matplotlib.font_manager as _fm
+            # Forcer le chargement du FontManager en mémoire
+            _ = _fm.fontManager.ttflist
+            # Créer et fermer une figure vide pour initialiser le renderer
+            _fig_tmp = _plt_warmup.figure()
+            _plt_warmup.close(_fig_tmp)
+            del _plt_warmup, _fig_tmp, _fm
+            _logger.info("Matplotlib warm-up: cache polices chargé.")
+        except Exception as _mpl_e:
+            _logger.debug("Matplotlib warm-up ignoré: %s", _mpl_e)
+
         # ── Warm-up kaleido (démarre Chromium une seule fois, avant les exports) ──
         try:
             from flowsom_pipeline_pro.src.utils.kaleido_scope import (
@@ -267,15 +285,18 @@ class FlowSOMPipeline:
 
             # MFI médiane par nœud SOM — même logique que plot_cluster_radar_mrd
             # Utilisée pour les spider plots de l'accueil (cohérence avec le radar HTML)
-            _node_mfi_rows = {}
-            for _nid in np.unique(clustering):
-                _mask = clustering == _nid
-                if _mask.sum() > 0:
-                    _node_mfi_rows[int(_nid)] = np.median(
-                        X_stacked[_mask], axis=0
-                    ).astype(float)
-            node_mfi_matrix = pd.DataFrame.from_dict(
-                _node_mfi_rows, orient="index", columns=selected_markers
+            # Vectorisé : tri par node id + np.split évite la boucle Python O(n_nodes).
+            _node_ids = np.unique(clustering)
+            _sort_idx = np.argsort(clustering, kind="stable")
+            _sorted_X = X_stacked[_sort_idx]
+            _sorted_labels = clustering[_sort_idx]
+            _split_points = np.searchsorted(_sorted_labels, _node_ids[1:])
+            _node_chunks = np.split(_sorted_X, _split_points)
+            _node_medians = np.array(
+                [np.median(chunk, axis=0) for chunk in _node_chunks], dtype=float
+            )
+            node_mfi_matrix = pd.DataFrame(
+                _node_medians, index=_node_ids, columns=selected_markers
             )
 
             # ── Étape 5: Metrics de clustering ────────────────────────────────
@@ -308,7 +329,7 @@ class FlowSOMPipeline:
                         X_stacked.shape[0], umap_sample_size, replace=False
                     )
                     umap_coords = UMAP(
-                        n_components=2, random_state=config.flowsom.seed, n_jobs=1
+                        n_components=2, random_state=config.flowsom.seed, n_jobs=-1
                     ).fit_transform(X_stacked[idx_umap])
                     fig_umap = plot_umap(
                         umap_coords,

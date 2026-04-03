@@ -956,7 +956,7 @@ def plot_gmm_vs_kde_qc(
 
     if output_path is not None:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
+        fig.savefig(str(output_path), dpi=100, bbox_inches="tight")
         _logger.info("QC GMM-KDE sauvegardé: %s", output_path)
 
     return fig, ax, gmm_threshold, kde_valley
@@ -980,7 +980,7 @@ def plot_cd45_kde_qc(
     kde_seuil_relatif: float = 0.05,
     kde_finesse: float = 0.6,
     kde_sigma_smooth: int = 10,
-    kde_n_grid: int = 4000,
+    kde_n_grid: int = 1000,
     # kept for backwards compat — ignored
     n_grid: int = 1_000,
 ) -> Tuple[Any, Any, float, Optional[float]]:
@@ -1204,7 +1204,7 @@ def plot_cd45_kde_qc(
     if output_path is not None:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(
-            str(output_path), dpi=150, bbox_inches="tight", facecolor=BG,
+            str(output_path), dpi=100, bbox_inches="tight", facecolor=BG,
         )
         _logger.info("QC CD45-KDE sauvegardé: %s", output_path)
 

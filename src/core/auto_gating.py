@@ -108,11 +108,11 @@ class AutoGating:
     def safe_fit_gmm(
         data: np.ndarray,
         n_components: int = 2,
-        n_init: int = 3,
-        max_retries: int = 5,
+        n_init: int = 1,
+        max_retries: int = 3,
         random_state: int = 42,
         covariance_type: str = "full",
-        max_iter: int = 200,
+        max_iter: int = 100,
         subsample: bool = True,
     ) -> Any:
         """
@@ -122,7 +122,7 @@ class AutoGating:
         En cas d'échec total sur n_components > 1, fallback sur 1 composante.
         Vérifie la convergence et émet des warnings si nécessaire.
 
-        [V2] Sous-échantillonnage automatique à 200k points max avant fit.
+        [V3] Sous-échantillonnage automatique à 50k points max avant fit.
 
         Args:
             data: Données à fitter (n_samples, n_features) ou (n_samples, 1)
@@ -295,8 +295,8 @@ class AutoGating:
                     data_scaled,
                     n_components=n_comp,
                     covariance_type=covariance_type,
-                    n_init=3,
-                    max_iter=200,
+                    n_init=1,
+                    max_iter=100,
                 )
                 bic = gmm_test.bic(
                     data_scaled
@@ -617,7 +617,7 @@ class AutoGating:
         if output_path is None:
             output_path = "gmm_debris_density.png"
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+        fig.savefig(output_path, dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
         _logger.info("[GMM] Graphique densités exporté: %s", output_path)
 
@@ -1071,7 +1071,7 @@ class AutoGating:
         seuil_relatif: float = 0.05,
         finesse: float = 0.6,
         sigma_smooth: int = 10,
-        n_grid: int = 4000,
+        n_grid: int = 1000,
     ):
         """
         Détection du seuil CD45 par KDE 1D + pied du pic (méthode vallée robuste).
@@ -1146,7 +1146,7 @@ class AutoGating:
         kde_seuil_relatif: float = 0.05,
         kde_finesse: float = 0.6,
         kde_sigma_smooth: int = 10,
-        kde_n_grid: int = 4000,
+        kde_n_grid: int = 1000,
         threshold_percentile: float = 5.0,
     ) -> np.ndarray:
         """

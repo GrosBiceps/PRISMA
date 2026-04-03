@@ -1013,7 +1013,7 @@ def plot_optimization_results(
     if output_path is not None:
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(str(out), dpi=150, bbox_inches="tight")
+        fig.savefig(str(out), dpi=100, bbox_inches="tight")
         _logger.info("Figure optimisation sauvegardée → %s", out)
         plt.close(fig)
 
