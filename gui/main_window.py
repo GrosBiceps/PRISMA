@@ -2,11 +2,12 @@
 """
 main_window.py — Interface graphique FlowSomAnalyzerPro v3 (Wizard / Stepper).
 
-Architecture UX en 4 étapes (QStackedWidget) :
-  Étape 1 — Import    : Drag & Drop fichiers FCS + sélection dossiers
-  Étape 2 — Paramétrage : Grille SOM, MRD, gating, options — avec validation visuelle
-  Étape 3 — Exécution : Console log + barre de progression par étape
-  Étape 4 — Résultats : Onglets MRD / Visualisation / Clusters / Représentations
+Architecture UX en 5 étapes (QStackedWidget) :
+    Étape 1 — Accueil   : Landing page de démarrage avec CTA
+    Étape 2 — Import    : Drag & Drop fichiers FCS + sélection dossiers
+    Étape 3 — Paramétrage : Grille SOM, MRD, gating, options — avec validation visuelle
+    Étape 4 — Exécution : Console log + barre de progression par étape
+    Étape 5 — Résultats : Onglets MRD / Visualisation / Clusters / Représentations
 
 Design :
   - Sidebar de navigation (StepSidebar) avec indicateurs d'état colorés
@@ -230,13 +231,15 @@ class DropZoneLabel(QLabel):
 # ══════════════════════════════════════════════════════════════════════
 
 _STEPS = [
-    ("1", "Import", "Dossiers FCS"),
-    ("2", "Paramétrage", "SOM · MRD · Gating"),
-    ("3", "Exécution", "Lancement & logs"),
-    ("4", "Résultats", "MRD · Visualisation"),
+    ("1", "Accueil", "Démarrage"),
+    ("2", "Import", "Dossiers FCS"),
+    ("3", "Paramétrage", "SOM · MRD · Gating"),
+    ("4", "Exécution", "Lancement & logs"),
+    ("5", "Résultats", "MRD · Visualisation"),
 ]
 
 _STEP_ICONS = [
+    "fa5s.home",
     "fa5s.folder-open",
     "fa5s.sliders-h",
     "fa5s.play-circle",
@@ -245,7 +248,7 @@ _STEP_ICONS = [
 
 
 class StepSidebar(QWidget):
-    """Barre latérale de navigation entre les 4 étapes du wizard."""
+    """Barre latérale de navigation entre les 5 étapes du wizard."""
 
     # État : 0=pending, 1=active, 2=done, 3=error
     STATE_PENDING = 0
@@ -268,29 +271,35 @@ class StepSidebar(QWidget):
 
         # ── Header logo ──
         header = QWidget()
+        header.setObjectName("sidebarHeader")
         header.setStyleSheet("""
-            QWidget {
+            QWidget#sidebarHeader {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(22, 24, 40, 1.0), stop:1 rgba(18, 20, 34, 1.0));
-                border-bottom: 1px solid rgba(137, 180, 250, 0.1);
+                border-bottom: 1px solid rgba(137, 180, 250, 0.16);
             }
         """)
         h_layout = QVBoxLayout(header)
-        h_layout.setContentsMargins(18, 22, 18, 18)
-        h_layout.setSpacing(3)
+        h_layout.setContentsMargins(18, 18, 18, 14)
+        h_layout.setSpacing(4)
 
         lbl_app = QLabel("FlowSOM")
-        lbl_app.setFont(QFont("Segoe UI", 15, QFont.Bold))
+        lbl_app.setFont(QFont("Segoe UI", 16, QFont.Bold))
         lbl_app.setStyleSheet(
-            "color: #a8c8ff; background: transparent; letter-spacing: -0.02em;"
+            "color: #d9e7ff; background: transparent; letter-spacing: -0.02em;"
         )
         h_layout.addWidget(lbl_app)
 
         lbl_sub = QLabel("MRD Analyzer Pro")
         lbl_sub.setStyleSheet(
-            "color: #2e3050; font-size: 9pt; background: transparent; font-weight: 500;"
+            "color: #7f8fbe; font-size: 10pt; background: transparent; font-weight: 500;"
         )
         h_layout.addWidget(lbl_sub)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: rgba(137, 180, 250, 0.14);")
+        h_layout.addWidget(sep)
 
         root.addWidget(header)
 
@@ -388,12 +397,12 @@ class StepSidebar(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Fenêtre principale — Wizard 4 étapes
+# Fenêtre principale — Wizard 5 étapes
 # ══════════════════════════════════════════════════════════════════════
 
 
 class FlowSomAnalyzerPro(QMainWindow):
-    """Application GUI FlowSOM Analysis Pro — architecture Wizard (4 étapes)."""
+    """Application GUI FlowSOM Analysis Pro — architecture Wizard (5 étapes)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -420,7 +429,7 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         self._init_ui()
         self._load_default_config()
-        self.statusBar().showMessage("Étape 1 / 4 — Sélectionnez les dossiers FCS")
+        self.statusBar().showMessage("Étape 1 / 5 — Accueil")
 
     # ------------------------------------------------------------------
     # Construction UI
@@ -439,18 +448,20 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._sidebar = StepSidebar(self)
         root.addWidget(self._sidebar)
 
-        # Stack des 4 étapes
+        # Stack des 5 étapes
         self._step_stack = QStackedWidget()
         self._step_stack.setObjectName("stepContent")
         root.addWidget(self._step_stack, 1)
 
-        # Étape 1 — Import
+        # Étape 1 — Accueil
+        self._step_stack.addWidget(self._build_step0_welcome())
+        # Étape 2 — Import
         self._step_stack.addWidget(self._build_step1_import())
-        # Étape 2 — Paramétrage
+        # Étape 3 — Paramétrage
         self._step_stack.addWidget(self._build_step2_params())
-        # Étape 3 — Exécution
+        # Étape 4 — Exécution
         self._step_stack.addWidget(self._build_step3_run())
-        # Étape 4 — Résultats
+        # Étape 5 — Résultats
         self._step_stack.addWidget(self._build_step4_results())
 
         self._navigate_to_step(0)
@@ -464,12 +475,174 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._step_stack.setCurrentIndex(idx)
         self._sidebar.set_active(idx)
         labels = [
-            "Étape 1 / 4 — Importation des données FCS",
-            "Étape 2 / 4 — Paramétrage du pipeline",
-            "Étape 3 / 4 — Exécution du pipeline",
-            "Étape 4 / 4 — Résultats & exports",
+            "Étape 1 / 5 — Accueil",
+            "Étape 2 / 5 — Importation des données FCS",
+            "Étape 3 / 5 — Paramétrage du pipeline",
+            "Étape 4 / 5 — Exécution du pipeline",
+            "Étape 5 / 5 — Résultats & exports",
         ]
         self.statusBar().showMessage(labels[idx])
+
+    # ══════════════════════════════════════════════════════════════════
+    # ÉTAPE 1 — Accueil (Landing)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_step0_welcome(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("welcomePage")
+        page.setStyleSheet(
+            "QWidget#welcomePage {"
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            "stop:0 #0d0d17, stop:1 #0a0a14);"
+            "}"
+        )
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(44, 34, 44, 34)
+        layout.setSpacing(20)
+        layout.setAlignment(Qt.AlignCenter)
+
+        card = QWidget()
+        card.setObjectName("welcomeCard")
+        card.setMinimumWidth(860)
+        card.setMaximumWidth(1020)
+        card.setStyleSheet(
+            "QWidget#welcomeCard {"
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            "stop:0 rgba(36, 38, 60, 0.84), stop:1 rgba(20, 22, 36, 0.80));"
+            "border-radius: 18px;"
+            "border: 1px solid rgba(137, 180, 250, 0.14);"
+            "}"
+        )
+        c = QVBoxLayout(card)
+        c.setContentsMargins(42, 34, 42, 30)
+        c.setSpacing(18)
+
+        badge = QLabel("BIENVENUE")
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setStyleSheet(
+            "background: rgba(137, 180, 250, 0.16); color: #d7e6ff; "
+            "border: 1px solid rgba(137, 180, 250, 0.24);"
+            "border-radius: 11px; padding: 6px 14px; font-size: 10px; font-weight: 700;"
+        )
+        c.addWidget(badge, alignment=Qt.AlignHCenter)
+
+        title = QLabel("FlowSOM MRD Analyzer Pro")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        c.addWidget(title)
+
+        sub = QLabel(
+            "Lancez une analyse de cytométrie en flux en 3 étapes simples :\n"
+            "import des données FCS, paramétrage du pipeline, puis exécution."
+        )
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setStyleSheet("color: #b8c4e6; font-size: 12pt; background: transparent;")
+        c.addWidget(sub)
+
+        body = QWidget()
+        body.setObjectName("welcomeBody")
+        body.setStyleSheet("QWidget#welcomeBody { background: transparent; }")
+        body_h = QHBoxLayout(body)
+        body_h.setContentsMargins(0, 0, 0, 0)
+        body_h.setSpacing(14)
+
+        col_left = QWidget()
+        col_left.setObjectName("welcomeColLeft")
+        col_left.setStyleSheet(
+            "QWidget#welcomeColLeft {"
+            "background: rgba(24, 26, 42, 0.66);"
+            "border-radius: 12px;"
+            "border: 1px solid rgba(137, 180, 250, 0.10);"
+            "}"
+        )
+        l = QVBoxLayout(col_left)
+        l.setContentsMargins(16, 14, 16, 14)
+        l.setSpacing(8)
+
+        l_title = QLabel("Parcours guidé")
+        l_title.setStyleSheet(
+            "color: #d2ddff; font-size: 11pt; font-weight: 700; background: transparent;"
+        )
+        l.addWidget(l_title)
+        for item in [
+            "1. Sélection des dossiers FCS",
+            "2. Paramétrage du pipeline",
+            "3. Exécution et visualisation des résultats",
+        ]:
+            lbl = QLabel(item)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                "color: #bcc8ec; font-size: 10.5pt; background: transparent;"
+            )
+            l.addWidget(lbl)
+        l.addStretch()
+
+        col_right = QWidget()
+        col_right.setObjectName("welcomeColRight")
+        col_right.setStyleSheet(
+            "QWidget#welcomeColRight {"
+            "background: rgba(20, 22, 36, 0.66);"
+            "border-radius: 12px;"
+            "border: 1px solid rgba(166, 227, 161, 0.09);"
+            "}"
+        )
+        r = QVBoxLayout(col_right)
+        r.setContentsMargins(16, 14, 16, 14)
+        r.setSpacing(8)
+
+        r_title = QLabel("Résultats disponibles")
+        r_title.setStyleSheet(
+            "color: #cff4cd; font-size: 11pt; font-weight: 700; background: transparent;"
+        )
+        r.addWidget(r_title)
+        for item in [
+            "Gauges MRD (JF / Flo / ELN)",
+            "Conclusion clinique synthétique",
+            "Clusters, visualisations et exports",
+        ]:
+            lbl = QLabel(f"• {item}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                "color: #bfcaed; font-size: 10.5pt; background: transparent;"
+            )
+            r.addWidget(lbl)
+        r.addStretch()
+
+        body_h.addWidget(col_left, 1)
+        body_h.addWidget(col_right, 1)
+        c.addWidget(body)
+
+        info = QLabel(
+            "Après exécution, vous accéderez automatiquement aux résultats MRD,\n"
+            "aux visualisations, aux clusters et aux exports HTML/CSV/FCS."
+        )
+        info.setAlignment(Qt.AlignCenter)
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            "color: #aab7df; font-size: 10.5pt; background: transparent;"
+        )
+        c.addWidget(info)
+
+        c.addSpacing(6)
+        btn_start = QPushButton("  Commencer la sélection des fichiers")
+        btn_start.setObjectName("primaryBtn")
+        btn_start.setMinimumHeight(48)
+        btn_start.setMinimumWidth(320)
+        ico_next = _icon("fa5s.arrow-right", "#eef4ff")
+        if ico_next:
+            btn_start.setIcon(ico_next)
+        btn_start.clicked.connect(lambda: self._navigate_to_step(1))
+        c.addWidget(btn_start, alignment=Qt.AlignHCenter)
+
+        hint = QLabel(
+            "Conseil : utilisez le glisser-déposer pour accélérer l'import FCS."
+        )
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet("color: #8c98c7; font-size: 9.5pt; background: transparent;")
+        c.addWidget(hint)
+
+        layout.addWidget(card, alignment=Qt.AlignCenter)
+        return page
 
     # ══════════════════════════════════════════════════════════════════
     # ÉTAPE 1 — Import (Drag & Drop)
@@ -551,7 +724,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         ico_next = _icon("fa5s.arrow-right", "#11111b")
         if ico_next:
             btn_next.setIcon(ico_next)
-        btn_next.clicked.connect(lambda: self._navigate_to_step(1))
+        btn_next.clicked.connect(lambda: self._navigate_to_step(2))
         nav.addWidget(btn_next)
         layout.addLayout(nav)
 
@@ -637,7 +810,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         ico_back = _icon("fa5s.arrow-left", "#89b4fa")
         if ico_back:
             btn_back.setIcon(ico_back)
-        btn_back.clicked.connect(lambda: self._navigate_to_step(0))
+        btn_back.clicked.connect(lambda: self._navigate_to_step(1))
         nbl.addWidget(btn_back)
 
         nbl.addStretch()
@@ -942,7 +1115,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         ico_back = _icon("fa5s.arrow-left", "#89b4fa")
         if ico_back:
             btn_back2.setIcon(ico_back)
-        btn_back2.clicked.connect(lambda: self._navigate_to_step(1))
+        btn_back2.clicked.connect(lambda: self._navigate_to_step(2))
         btn_row.addWidget(btn_back2)
 
         btn_clear_log = QPushButton("  Effacer")
@@ -1044,7 +1217,7 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         btn_back3 = QPushButton("  Logs")
         btn_back3.setObjectName("ghostBtn")
-        btn_back3.clicked.connect(lambda: self._navigate_to_step(2))
+        btn_back3.clicked.connect(lambda: self._navigate_to_step(3))
         abl.addWidget(btn_back3)
 
         layout.addWidget(action_bar)
@@ -1679,8 +1852,8 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._sync_ui_to_config()
 
         # Passer à l'étape Exécution
-        self._navigate_to_step(2)
-        self._sidebar.set_active(2)
+        self._navigate_to_step(3)
+        self._sidebar.set_active(3)
 
         self.btn_run_step3.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -1735,7 +1908,7 @@ class FlowSomAnalyzerPro(QMainWindow):
                 self.btn_run_step3.setEnabled(True)
                 self.btn_stop.setEnabled(False)
                 self.statusBar().showMessage("Pipeline interrompu")
-                self._sidebar.set_error(2)
+                self._sidebar.set_error(3)
 
     # ── Slots worker ───────────────────────────────────────────────────
 
@@ -1757,7 +1930,7 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         if result is not None and result.success:
             self.progress_bar.setValue(100)
-            self._sidebar.set_done(2)
+            self._sidebar.set_done(3)
             elapsed = (
                 f"{result.elapsed_seconds:.1f}s"
                 if hasattr(result, "elapsed_seconds")
@@ -1777,16 +1950,16 @@ class FlowSomAnalyzerPro(QMainWindow):
             method_used = self.combo_mrd_method.currentText()
             self._home_tab.load_result(result, method_used)
             # Aller automatiquement aux résultats
-            self._navigate_to_step(3)
-            self._sidebar.set_done(3)
+            self._navigate_to_step(4)
+            self._sidebar.set_done(4)
             self.tabs.setCurrentIndex(0)
         else:
-            self._sidebar.set_error(2)
+            self._sidebar.set_error(3)
             self.statusBar().showMessage(" Pipeline terminé avec des erreurs")
             self._log("═══ Pipeline terminé avec des erreurs — vérifiez les logs ═══")
 
     def _on_pipeline_error(self, msg: str) -> None:
-        self._sidebar.set_error(2)
+        self._sidebar.set_error(3)
         self.statusBar().showMessage(f" Erreur : {msg[:80]}")
 
     def _on_batch_file_started(self, current: int, total: int, filename: str) -> None:
@@ -1804,7 +1977,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.progress_bar.setValue(100)
 
         if summary is None:
-            self._sidebar.set_error(2)
+            self._sidebar.set_error(3)
             self.statusBar().showMessage(" Batch terminé avec des erreurs")
             return
 
@@ -1812,7 +1985,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         excel = summary.get("excel")
         n_ok = sum(1 for _, r in results if r is not None and r.success)
         n_total = len(results)
-        self._sidebar.set_done(2)
+        self._sidebar.set_done(3)
         self.statusBar().showMessage(f" Batch terminé — {n_ok}/{n_total} fichier(s)")
         self._log(f"BATCH TERMINÉ : {n_ok}/{n_total} fichier(s) réussis")
         if excel:
