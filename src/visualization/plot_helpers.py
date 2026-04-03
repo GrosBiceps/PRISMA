@@ -15,9 +15,20 @@ from typing import Optional, Tuple
 import numpy as np
 
 try:
+    import logging as _logging
     import matplotlib
 
     matplotlib.use("Agg")  # Backend non-interactif par défaut (compatible serveur)
+
+    # Court-circuite la recherche dynamique de polices : force DejaVu Sans
+    # (toujours disponible dans matplotlib) pour éviter les 30 000 logs findfont.
+    matplotlib.rcParams["font.family"] = "sans-serif"
+    matplotlib.rcParams["font.sans-serif"] = ["DejaVu Sans", "Arial", "Helvetica"]
+
+    # Silence le logger DEBUG du font_manager dans chaque worker multiprocessing
+    _logging.getLogger("matplotlib.font_manager").setLevel(_logging.ERROR)
+    _logging.getLogger("matplotlib").setLevel(_logging.WARNING)
+
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
     from matplotlib.ticker import FuncFormatter

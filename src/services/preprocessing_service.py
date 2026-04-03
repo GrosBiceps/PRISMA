@@ -418,10 +418,13 @@ def preprocess_all_samples(
     n_samples = len(samples)
 
     if _use_parallel and n_samples > 1:
-        # n_jobs=-1 → utilise tous les cœurs physiques disponibles
-        # prefer="threads" évite le coût de sérialisation pickle des gros arrays numpy
-        # (le GIL est libéré par numpy/scipy → vrai parallélisme)
-        results = Parallel(n_jobs=-1, prefer="threads", verbose=0)(
+        import os
+        # Multiprocessing (loky) : chaque worker a sa propre instance Matplotlib/Pandas
+        # → contourne le GIL et évite le lock du font_manager Matplotlib.
+        # Bridé à 4 workers max pour limiter la consommation RAM (chaque process
+        # copie les DataFrames via pickle).
+        n_jobs = min(4, os.cpu_count() or 1)
+        results = Parallel(n_jobs=n_jobs, backend="loky", verbose=0)(
             delayed(preprocess_sample)(s, config, GatingLogger())
             for s in samples
         )
