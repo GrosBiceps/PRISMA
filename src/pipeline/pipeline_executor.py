@@ -1236,28 +1236,22 @@ class FlowSOMPipeline:
         _logger.info("  xNodes: [%.3f – %.3f]", xNodes.min(), xNodes.max())
         _logger.info("  yNodes: [%.3f – %.3f]", yNodes.min(), yNodes.max())
 
-        # ── 5. Assemblage ─────────────────────────────────────────────────────
-        df = pd.DataFrame(X_raw, columns=raw_var_names)
-
-        # Colonnes FlowSOM (+1 pour commencer à 1 dans Kaluza)
-        df["FlowSOM_metacluster"] = (metaclustering + 1).astype(np.float32)
-        df["FlowSOM_cluster"] = (clustering + 1).astype(np.float32)
-
-        # Coordonnées SOM
-        df["xGrid"] = xGrid.astype(np.float32)
-        df["yGrid"] = yGrid.astype(np.float32)
-        df["xNodes"] = xNodes.astype(np.float32)
-        df["yNodes"] = yNodes.astype(np.float32)
-
-        # Taille du node
-        df["size"] = node_sizes[cl_int].astype(np.float32)
-
-        # Métadonnées cellule
-        df["Condition"] = obs["condition"].values
-        df["Condition_Num"] = np.where(df["Condition"] == "Sain", 1.0, 2.0).astype(
-            np.float32
-        )
-        df["File_Origin"] = obs["file_origin"].values
+        # ── 5. Assemblage vectorisé (un seul pd.DataFrame call) ──────────────
+        # Construire le dict NumPy complet AVANT pd.DataFrame pour éviter
+        # les 13 affectations colonne par colonne (chacune copie 2M lignes).
+        condition_arr = obs["condition"].values
+        col_dict: dict = {name: X_raw[:, i] for i, name in enumerate(raw_var_names)}
+        col_dict["FlowSOM_metacluster"] = (metaclustering + 1).astype(np.float32)
+        col_dict["FlowSOM_cluster"] = (clustering + 1).astype(np.float32)
+        col_dict["xGrid"] = xGrid.astype(np.float32)
+        col_dict["yGrid"] = yGrid.astype(np.float32)
+        col_dict["xNodes"] = xNodes.astype(np.float32)
+        col_dict["yNodes"] = yNodes.astype(np.float32)
+        col_dict["size"] = node_sizes[cl_int].astype(np.float32)
+        col_dict["Condition"] = condition_arr
+        col_dict["Condition_Num"] = np.where(condition_arr == "Sain", np.float32(1.0), np.float32(2.0))
+        col_dict["File_Origin"] = obs["file_origin"].values
+        df = pd.DataFrame(col_dict)
 
         _logger.info(
             "  DataFrame FCS complet: %d cellules × %d colonnes",

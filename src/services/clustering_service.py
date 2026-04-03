@@ -225,24 +225,35 @@ def stack_raw_markers(
         )
 
     all_X: List[np.ndarray] = []
-    all_obs: List[Dict] = []
+    all_conditions: List[np.ndarray] = []
+    all_origins: List[np.ndarray] = []
 
     if has_raw:
         raw_var_names: List[str] = list(samples[0].raw_data.columns)
         for s in samples:
-            X_s = s.raw_data.values.astype(np.float64)
+            X_s = s.raw_data.values
+            if X_s.dtype != np.float32:
+                X_s = X_s.astype(np.float32)
+            n = X_s.shape[0]
             all_X.append(X_s)
-            for _ in range(X_s.shape[0]):
-                all_obs.append({"condition": s.condition, "file_origin": s.name})
+            all_conditions.append(np.full(n, s.condition, dtype=object))
+            all_origins.append(np.full(n, s.name, dtype=object))
     else:
         raw_var_names = list(samples[0].var_names)
         for s in samples:
-            all_X.append(s.matrix.astype(np.float64))
-            for _ in range(s.matrix.shape[0]):
-                all_obs.append({"condition": s.condition, "file_origin": s.name})
+            X_s = s.matrix
+            if X_s.dtype != np.float32:
+                X_s = X_s.astype(np.float32)
+            n = X_s.shape[0]
+            all_X.append(X_s)
+            all_conditions.append(np.full(n, s.condition, dtype=object))
+            all_origins.append(np.full(n, s.name, dtype=object))
 
     X = np.vstack(all_X)
-    obs = pd.DataFrame(all_obs)
+    obs = pd.DataFrame({
+        "condition": np.concatenate(all_conditions),
+        "file_origin": np.concatenate(all_origins),
+    })
     return X, raw_var_names, obs
 
 

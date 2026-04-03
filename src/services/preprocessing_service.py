@@ -667,9 +667,10 @@ def preprocess_combined(
     # ── 5+6. Transformation cytométrique + Normalisation ──────────────────────
     X_raw = _apply_transforms(X_raw, var_names, config)
 
-    # Mise à jour X_for_plot avec les données transformées (logicle/arcsinh)
-    # pour que le comptage CD45+ brut et le plot KDE CD45 soient dans le bon espace.
-    X_for_plot = X_raw.copy()
+    # Données transformées pour le plot KDE CD45 (espace logicle/arcsinh).
+    # On utilise un alias séparé pour ne pas écraser X_for_plot pré-gating
+    # (utilisé par generate_all_gating_plots avec gate_masks de taille n_total_raw).
+    X_transformed_for_kde = X_raw
 
     # ── Plot KDE CD45 sur données transformées (logicle/arcsinh) ─────────────
     # Ce plot doit être généré APRÈS la transformation pour afficher le CD45
@@ -699,7 +700,7 @@ def preprocess_combined(
                     _mask_g3_local = _raw_g3[_combined_mask]
                 else:
                     # Gate CD45 désactivée ou combined_mask indisponible → toutes les cellules
-                    _mask_g3_local = np.ones(X_for_plot.shape[0], dtype=bool)
+                    _mask_g3_local = np.ones(X_transformed_for_kde.shape[0], dtype=bool)
 
                 # Restreindre le KDE CD45 aux cellules pathologiques uniquement.
                 # Le seuil KDE est plus pertinent sur les blastes (CD45-dim) que
@@ -710,7 +711,7 @@ def preprocess_combined(
                 )
                 _n_patho = int(_is_patho_local.sum())
                 if _n_patho >= 5:
-                    _cd45_data_plot = X_for_plot[_is_patho_local, _cd45_idx]
+                    _cd45_data_plot = X_transformed_for_kde[_is_patho_local, _cd45_idx]
                     _mask_g3_plot = _mask_g3_local[_is_patho_local]
                     _cond_plot = conditions[_is_patho_local]
                     _logger.info(
@@ -719,7 +720,7 @@ def preprocess_combined(
                     )
                 else:
                     # Pas de cellules patho identifiées → utiliser tout
-                    _cd45_data_plot = X_for_plot[:, _cd45_idx]
+                    _cd45_data_plot = X_transformed_for_kde[:, _cd45_idx]
                     _mask_g3_plot = _mask_g3_local
                     _cond_plot = conditions
                     _logger.info(

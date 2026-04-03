@@ -2268,9 +2268,8 @@ def plot_patho_pct_per_cluster(
             out_jpg = Path(output_jpg)
             out_jpg.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fig.write_image(
-                    str(out_jpg), format="jpg", width=1400, height=620, scale=2
-                )
+                from flowsom_pipeline_pro.src.utils.kaleido_scope import write_image_fast
+                write_image_fast(fig, out_jpg, fmt="jpg", width=1400, height=620, scale=2)
                 _logger.info("Patho%% par cluster (JPG) sauvegardé: %s", out_jpg.name)
             except Exception as _img_err:
                 _logger.warning(
@@ -2430,9 +2429,8 @@ def plot_cells_pct_per_cluster(
             out_jpg = Path(output_jpg)
             out_jpg.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fig.write_image(
-                    str(out_jpg), format="jpg", width=1400, height=620, scale=2
-                )
+                from flowsom_pipeline_pro.src.utils.kaleido_scope import write_image_fast
+                write_image_fast(fig, out_jpg, fmt="jpg", width=1400, height=620, scale=2)
                 _logger.info(
                     "%%Cellules par cluster (JPG) sauvegardé: %s", out_jpg.name
                 )
@@ -2598,13 +2596,8 @@ def plot_patho_pct_per_som_node(
             out_jpg = Path(output_jpg)
             out_jpg.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fig.write_image(
-                    str(out_jpg),
-                    format="jpg",
-                    width=max(1800, n_nodes * 22),
-                    height=680,
-                    scale=2,
-                )
+                from flowsom_pipeline_pro.src.utils.kaleido_scope import write_image_fast
+                write_image_fast(fig, out_jpg, fmt="jpg", width=max(1800, n_nodes * 22), height=680, scale=2)
                 _logger.info("Patho%% par nœud SOM (JPG) sauvegardé: %s", out_jpg.name)
             except Exception as _img_err:
                 _logger.warning(
@@ -2769,13 +2762,8 @@ def plot_cells_pct_per_som_node(
             out_jpg = Path(output_jpg)
             out_jpg.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fig.write_image(
-                    str(out_jpg),
-                    format="jpg",
-                    width=max(1800, n_nodes * 22),
-                    height=680,
-                    scale=2,
-                )
+                from flowsom_pipeline_pro.src.utils.kaleido_scope import write_image_fast
+                write_image_fast(fig, out_jpg, fmt="jpg", width=max(1800, n_nodes * 22), height=680, scale=2)
                 _logger.info(
                     "%%Cellules par nœud SOM (JPG) sauvegardé: %s", out_jpg.name
                 )
@@ -3399,9 +3387,8 @@ def plot_mrd_summary(
             out_png = Path(output_png)
             out_png.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fig.write_image(
-                    str(out_png), format="png", width=1800, height=950, scale=2
-                )
+                from flowsom_pipeline_pro.src.utils.kaleido_scope import write_image_fast
+                write_image_fast(fig, out_png, fmt="png", width=1800, height=950, scale=2)
                 _logger.info("MRD summary (PNG): %s", out_png.name)
             except Exception as _img_err:
                 _logger.warning("Export PNG MRD échoué (kaleido requis): %s", _img_err)
