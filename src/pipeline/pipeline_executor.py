@@ -1714,6 +1714,7 @@ class FlowSOMPipeline:
                         "fig_cells_pct": "% Cellules par Cluster (Distribution Globale)",
                         "fig_mrd_summary": "MRD Résiduelle — Nœuds SOM (JF / Flo + contrôles ELN)",
                         "fig_blast_mrd_classification": "Classification Phénotypique des Nœuds MRD (ELN 2022)",
+                        "fig_mrd_blast_radar": "Radar MRD — Nœuds Porte 2 (BLAST_HIGH / BLAST_MODERATE)",
                     }
 
                     _patho_info = None

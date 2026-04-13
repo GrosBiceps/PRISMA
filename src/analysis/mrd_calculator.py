@@ -159,6 +159,11 @@ class BlastPhenotypeFilter:
     Granularité : applicable indépendamment à chaque méthode (apply_to_jf,
     apply_to_flo, apply_to_eln) pour une configuration fine.
 
+    Seuils configurables (high_threshold, moderate_threshold, weak_threshold) :
+      Permettent d'adapter la sensibilité à la présentation clinique.
+      Ex : abaisser moderate_threshold à 2.0 pour capturer les blastes matures
+      ayant perdu le CD34 dans les leucémies massives avancées.
+
     Référence : blast_detection.py — build_blast_weights(), score_nodes_for_blasts(),
                categorize_blast_score() — basés sur ELN 2022 + score Ogata.
     """
@@ -169,6 +174,9 @@ class BlastPhenotypeFilter:
     apply_to_jf: bool = True
     apply_to_flo: bool = True
     apply_to_eln: bool = True
+    high_threshold: float = 6.0
+    moderate_threshold: float = 2.0
+    weak_threshold: float = 0.0
 
 
 @dataclass
@@ -243,6 +251,12 @@ def load_mrd_config(config_path: Optional[Path | str] = None) -> MRDConfig:
                     "apply_to_flo", cfg.blast_phenotype_filter.apply_to_flo)
                 cfg.blast_phenotype_filter.apply_to_eln = bpf.get(
                     "apply_to_eln", cfg.blast_phenotype_filter.apply_to_eln)
+                cfg.blast_phenotype_filter.high_threshold = float(bpf.get(
+                    "high_threshold", cfg.blast_phenotype_filter.high_threshold))
+                cfg.blast_phenotype_filter.moderate_threshold = float(bpf.get(
+                    "moderate_threshold", cfg.blast_phenotype_filter.moderate_threshold))
+                cfg.blast_phenotype_filter.weak_threshold = float(bpf.get(
+                    "weak_threshold", cfg.blast_phenotype_filter.weak_threshold))
 
                 _logger.info("MRD config chargée depuis %s", config_path.name)
             except Exception as e:
@@ -639,7 +653,13 @@ def compute_mrd(
                     nbm_scale=np.asarray(nbm_scale, dtype=float) if _has_nbm_stats and not _has_xnorm else None,
                 )
                 node_blast_cats = [
-                    categorize_blast_score(float(s)) for s in node_blast_scores
+                    categorize_blast_score(
+                        float(s),
+                        high_thresh=bpf.high_threshold,
+                        mod_thresh=bpf.moderate_threshold,
+                        weak_thresh=bpf.weak_threshold,
+                    )
+                    for s in node_blast_scores
                 ]
                 blast_filter_active = True
                 _n_high = sum(1 for c in node_blast_cats if c == "BLAST_HIGH")

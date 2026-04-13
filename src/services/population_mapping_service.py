@@ -522,7 +522,7 @@ class PopulationMappingService:
                     result.figures_plotly["fig_mrd_blast_radar"] = _fig_mrd_radar
                     _logger.info("[§10.4e] Radar MRD clinique généré.")
             except Exception as exc:
-                _logger.debug("[§10.4e] Radar MRD clinique échoué: %s", exc)
+                _logger.warning("[§10.4e] Radar MRD clinique échoué: %s", exc, exc_info=True)
 
         # ── §10.5 MST interactif ──────────────────────────────────────────────
         if best_mapping is not None and result.node_coords_df is not None:

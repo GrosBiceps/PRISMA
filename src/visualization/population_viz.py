@@ -606,27 +606,32 @@ def plot_mrd_blast_radar(
         values = list(row[marker_cols].values.astype(float))
         values_closed = values + [values[0]]
 
-        # Texte hover détaillé par axe
-        hover_parts = [
+        # Convertir la couleur hex en rgba pour le fillcolor (alpha 15%)
+        # Plotly accepte rgba() mais pas les hex 8 caractères (#rrggbbaa)
+        r_hex = int(color[1:3], 16)
+        g_hex = int(color[3:5], 16)
+        b_hex = int(color[5:7], 16)
+        fill_rgba = f"rgba({r_hex},{g_hex},{b_hex},0.15)"
+
+        pct_line = f"<br>Pureté patho: {pct:.0f}%" if pct is not None else ""
+        hover_tpl = (
             f"<b>Nœud #{node_id}</b><br>"
-            f"Score: {score:.1f}/10 – {cat}"
-            + (f"<br>Pureté patho: {pct:.0f}%" if pct is not None else "")
-            + f"<br>Marqueur: %{{theta}}<br>z-score: %{{r:.2f}}"
-        ] * len(theta_closed)
+            f"Score: {score:.1f}/10 \u2013 {cat}"
+            f"{pct_line}"
+            "<br>Marqueur: %{theta}<br>z-score: %{r}<extra></extra>"
+        )
 
         fig.add_trace(
             go.Scatterpolar(
                 r=values_closed,
                 theta=theta_closed,
                 fill="toself",
-                fillcolor=color.replace(")", ", 0.15)").replace("rgb", "rgba")
-                if color.startswith("rgb")
-                else color + "26",  # hex + alpha 15%
+                fillcolor=fill_rgba,
                 line=dict(color=color, width=2.5),
                 mode="lines+markers",
                 marker=dict(size=6, color=color),
                 name=legend_label,
-                hovertemplate=hover_parts[0] + "<extra></extra>",
+                hovertemplate=hover_tpl,
                 legendgroup=f"node_{node_id}",
                 showlegend=True,
             )

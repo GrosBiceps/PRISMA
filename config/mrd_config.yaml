@@ -1,12 +1,15 @@
 mrd_parameters:
   blast_phenotype_filter:
-    allowed_categories:            # BLAST_MODERATE / BLAST_WEAK / BLAST_HIGH
+    allowed_categories:
     - BLAST_HIGH
     - BLAST_MODERATE
     apply_to_eln: true
     apply_to_flo: true
     apply_to_jf: true
     enabled: true
+    high_threshold: 6.0
+    moderate_threshold: 2.0
+    weak_threshold: 0.0
   condition_patho: Pathologique
   condition_sain: Sain
   eln_standards:

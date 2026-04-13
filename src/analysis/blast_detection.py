@@ -125,13 +125,13 @@ _logger = get_logger("analysis.blast_detection")
 #  Seuils de catégorisation (score /10)
 #
 #  BLAST_HIGH_THRESHOLD     = 6.0 → ≥2 anomalies phénotypiques majeures (LAIP fort)
-#  BLAST_MODERATE_THRESHOLD = 3.0 → 1 anomalie majeure ou plusieurs mineures
+#  BLAST_MODERATE_THRESHOLD = 2.0 → blastes matures CD34- (CD45-dim/HLA-DR), anciennement 3.0
 #  BLAST_WEAK_THRESHOLD     = 0.0 → signal positif minimal
 #
 #  ⚠  Valeurs heuristiques — calibrer via ROC sur cohorte locale avant usage clinique.
 # ─────────────────────────────────────────────────────────────────────────────
 BLAST_HIGH_THRESHOLD = 6.0
-BLAST_MODERATE_THRESHOLD = 3.0
+BLAST_MODERATE_THRESHOLD = 2.0
 BLAST_WEAK_THRESHOLD = 0.0
 
 
@@ -304,25 +304,30 @@ def score_nodes_for_blasts(
     return scores_10
 
 
-def categorize_blast_score(score: float) -> str:
+def categorize_blast_score(
+    score: float,
+    high_thresh: float = BLAST_HIGH_THRESHOLD,
+    mod_thresh: float = BLAST_MODERATE_THRESHOLD,
+    weak_thresh: float = BLAST_WEAK_THRESHOLD,
+) -> str:
     """
     Classifie un score blast /10 en catégorie clinique ELN 2022 / Ogata.
 
     ── Correspondance avec les critères cliniques ───────────────────────────────
 
-    BLAST_HIGH (≥ 6.0) :
+    BLAST_HIGH (≥ high_thresh, défaut 6.0) :
       Correspond à ≥2 anomalies phénotypiques majeures simultanées (ex: CD34++
       ET CD117++, ou CD34++ ET CD45-dim). Équivalent à un LAIP fort selon ELN 2022
       (Schuurhuis et al., Blood 2018, Table 2). Recommande une confirmation par
       morphologie ou biologie moléculaire.
 
-    BLAST_MODERATE (≥ 3.0) :
-      1 anomalie majeure ou combinaison d'anomalies mineures. Intermédiaire —
-      surveillance renforcée recommandée. Peut correspondre à des cellules
-      progénitrices normales isolées dans un nœud SOM (faux positifs possibles
-      sans filtre topologique MRD).
+    BLAST_MODERATE (≥ mod_thresh, défaut 2.0) :
+      1 anomalie majeure ou combinaison d'anomalies mineures. Abaissé à 2.0 pour
+      capturer les blastes matures ayant perdu le CD34 mais conservant CD45-dim
+      (+2.0 pts) ou HLA-DR (+1.5 pts) — typique des leucémies massives avancées.
+      Configurable via blast_phenotype_filter.moderate_threshold dans mrd_config.yaml.
 
-    BLAST_WEAK (> 0.0) :
+    BLAST_WEAK (> weak_thresh, défaut 0.0) :
       Signal faible — population atypique sans seuil d'alarme clinique. Utile
       pour la traçabilité et la détection précoce sur séries longitudinales.
 
@@ -335,17 +340,20 @@ def categorize_blast_score(score: float) -> str:
 
     Args:
         score: Score blast dans [0.0, 10.0] produit par score_nodes_for_blasts().
+        high_thresh: Seuil BLAST_HIGH (défaut : constante globale BLAST_HIGH_THRESHOLD).
+        mod_thresh: Seuil BLAST_MODERATE (défaut : constante globale BLAST_MODERATE_THRESHOLD).
+        weak_thresh: Seuil BLAST_WEAK (défaut : constante globale BLAST_WEAK_THRESHOLD).
 
     Returns:
         Catégorie : "BLAST_HIGH" | "BLAST_MODERATE" | "BLAST_WEAK" | "NON_BLAST_UNK".
     """
-    if score >= BLAST_HIGH_THRESHOLD:
+    if score >= high_thresh:
         # ≥2 anomalies majeures — LAIP fort (ELN 2022)
         return "BLAST_HIGH"
-    elif score >= BLAST_MODERATE_THRESHOLD:
+    elif score >= mod_thresh:
         # 1 anomalie majeure ou combinaison mineures — phénotype intermédiaire
         return "BLAST_MODERATE"
-    elif score > BLAST_WEAK_THRESHOLD:
+    elif score > weak_thresh:
         # Signal léger — population atypique à surveiller
         return "BLAST_WEAK"
     # Score nul — aucune déviation phénotypique par rapport à la moelle normale
