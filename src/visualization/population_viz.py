@@ -120,25 +120,42 @@ def plot_blast_radar(
     ref_profiles: Optional[Dict[str, "pd.Series"]] = None,
 ) -> Optional["go.Figure"]:
     """
-    Radar (spider) charts : un subplot par nœud candidat blast.
+    Radar (spider) charts qualité publication : un subplot par nœud candidat blast.
 
-    Chaque trace montre le profil multivarié du nœud dans l'espace
-    de référence normalisé. Les projections > 1 indiquent une
-    sur-expression par rapport à la population de référence.
+    ── Design clinique ──────────────────────────────────────────────────────────
+
+    Les valeurs affichées sont des **z-scores** (déviations vs moelle normale NBM).
+    L'axe radial est centré sur z = 0 (NBM) et s'étend dans les négatifs (CD45-dim,
+    SSC-bas) et les positifs (CD34++, CD117++), ce qui permet de visualiser les deux
+    directions d'anomalie sur la même toile.
+
+    Chaque subplot contient :
+      • Zone saine (z = 0) : polygone de référence NBM en pointillés verts translucides.
+        Tout ce qui dépasse vers l'extérieur = surexpression vs NBM.
+        Tout ce qui rentre vers l'intérieur = sous-expression vs NBM (ex: CD45-dim).
+      • Profil du nœud : polygone coloré selon la catégorie blast (rouge = BLAST_HIGH,
+        orange = BLAST_MODERATE, jaune = BLAST_WEAK, gris = NON_BLAST).
+
+    ── Gestion des z-scores négatifs ───────────────────────────────────────────
+
+    Plotly en mode polar impose r ≥ 0 par défaut. Pour afficher correctement les
+    z-scores négatifs (ex: CD45 z = -2.0 pour un blaste CD45-dim), on applique un
+    décalage : r_display = z_score + R_OFFSET, où R_OFFSET = |r_min| + marge.
+    La ligne de référence NBM (z = 0) correspond alors à r_display = R_OFFSET.
+    Les cercles de grille sont étiquetés avec les vraies valeurs z (-2, -1, 0, +1, +2).
 
     Args:
-        blast_df: DataFrame de build_blast_score_dataframe.
-        marker_cols: Colonnes '_M8' (auto-détectées si None).
-        max_nodes: Nombre maximum de nœuds à afficher.
-        title: Titre global.
-        output_dir: Répertoire de sortie.
-        timestamp: Suffixe du fichier.
+        blast_df: DataFrame de build_blast_score_dataframe (colonnes *_M8 = z-scores).
+        marker_cols: Colonnes '_M8' à afficher (auto-détectées si None).
+        max_nodes: Nombre maximum de nœuds à afficher (défaut 12).
+        title: Titre global de la figure.
+        output_dir: Répertoire de sortie HTML.
+        timestamp: Suffixe du nom de fichier.
         ref_profiles: Dict optionnel {nom_population: pd.Series(valeurs_M8_normalisées)}
-                      pour superposer des profils de référence (Granulocytes, Lymphocytes…)
-                      sur chaque subplot radar.
+                      pour superposer des profils de référence sur chaque subplot.
 
     Returns:
-        Figure Plotly.
+        Figure Plotly interactive, ou None si données insuffisantes.
     """
     if not _PLOTLY_AVAILABLE:
         return None
@@ -149,6 +166,7 @@ def plot_blast_radar(
     if not marker_cols:
         return None
 
+    # ── 1. Tri : BLAST_HIGH en premier, puis score décroissant ───────────────
     category_order = ["BLAST_HIGH", "BLAST_MODERATE", "BLAST_WEAK", "NON_BLAST_UNK"]
     df_sorted = (
         blast_df.sort_values(
@@ -165,88 +183,234 @@ def plot_blast_radar(
     )
 
     n_plots = min(len(df_sorted), max_nodes)
-    n_cols = min(4, n_plots)
+    n_cols = min(3, n_plots)   # 3 colonnes max pour garder chaque radar lisible
     n_rows = math.ceil(n_plots / n_cols)
+
+    # ── 2. Calcul du décalage radial pour gérer les z-scores négatifs ────────
+    # Plotly polar n'affiche pas r < 0. On décale toutes les valeurs de R_OFFSET
+    # pour que les z-scores négatifs restent visibles (ex: CD45 z=-2 → r=1.0).
+    all_z = df_sorted[marker_cols].values.astype(float)
+    z_min = float(np.nanmin(all_z))
+    z_max = float(np.nanmax(all_z))
+    # R_OFFSET : assure que même le z-score le plus négatif donne r > 0
+    R_OFFSET = max(3.5, abs(z_min) + 0.5)
+    # Plage d'affichage : [0, R_OFFSET + z_max + marge]
+    r_display_max = R_OFFSET + max(z_max + 0.5, 2.0)
+
+    # Cercles de grille aux valeurs z clés (-2, -1, 0, +1, +2, +3)
+    z_ticks = [z for z in [-3, -2, -1, 0, 1, 2, 3] if -R_OFFSET <= z <= z_max + 1]
+    r_ticks = [R_OFFSET + z for z in z_ticks]
+    tick_labels = [f"z={z:+d}" if z != 0 else "NBM (z=0)" for z in z_ticks]
+
+    # ── 3. Labels d'axes angulaires (noms des marqueurs) ─────────────────────
+    marker_labels = [c.replace("_M8", "") for c in marker_cols]
+    # Polygone fermé : on répète le premier axe à la fin
+    theta_closed = marker_labels + [marker_labels[0]]
+
+    # ── 4. Polygone de référence NBM (z = 0 sur tous les axes) ───────────────
+    # Dans l'espace décalé : r_nbm = R_OFFSET pour tous les marqueurs
+    r_nbm = [R_OFFSET] * len(marker_labels) + [R_OFFSET]
+
+    # ── 5. Couleurs par catégorie blast ───────────────────────────────────────
+    # Remplissage (fillcolor) = couleur ligne + alpha 0.20 pour garder la lisibilité
+    _COLORS = {
+        "BLAST_HIGH":     {"line": "#c0392b", "fill": "rgba(192,57,43,0.20)"},
+        "BLAST_MODERATE": {"line": "#e67e22", "fill": "rgba(230,126,34,0.20)"},
+        "BLAST_WEAK":     {"line": "#f1c40f", "fill": "rgba(241,196,15,0.15)"},
+        "NON_BLAST_UNK":  {"line": "#7f8c8d", "fill": "rgba(127,140,141,0.12)"},
+    }
+    _DEFAULT_COLOR = {"line": "#95a5a6", "fill": "rgba(149,165,166,0.12)"}
+
+    # ── 6. Titres des subplots avec score et ID nœud ─────────────────────────
+    subplot_titles = []
+    for i in range(n_plots):
+        row = df_sorted.loc[i]
+        nid = int(row["node_id"])
+        score = float(row["blast_score"])
+        cat = str(row["blast_category"])
+        subplot_titles.append(f"Nœud #{nid} — {score:.1f}/10 ({cat})")
 
     specs = [[{"type": "polar"} for _ in range(n_cols)] for _ in range(n_rows)]
     fig = make_subplots(
         rows=n_rows,
         cols=n_cols,
         specs=specs,
-        subplot_titles=[
-            f"Node {int(df_sorted.loc[i, 'node_id'])} | {df_sorted.loc[i, 'blast_category']}"
-            for i in range(n_plots)
-        ],
+        subplot_titles=subplot_titles,
+        # Espacement généreux entre subplots pour éviter chevauchement des titres
+        horizontal_spacing=0.08,
+        vertical_spacing=0.14,
     )
 
-    theta = [c.replace("_M8", "") for c in marker_cols] + [
-        marker_cols[0].replace("_M8", "")
-    ]
-    color_map = {
-        "BLAST_HIGH": "red",
-        "BLAST_MODERATE": "orange",
-        "BLAST_WEAK": "yellow",
-        "NON_BLAST_UNK": "lightblue",
-    }
-
+    # ── 7. Tracé de chaque nœud ───────────────────────────────────────────────
     for i, row_data in df_sorted.iterrows():
-        values = list(row_data[marker_cols].values.astype(float))
-        values_closed = values + [values[0]]  # fermer le polygone
         r_idx = (i // n_cols) + 1
         c_idx = (i % n_cols) + 1
         cat = str(row_data["blast_category"])
-        color = color_map.get(cat, "gray")
+        colors = _COLORS.get(cat, _DEFAULT_COLOR)
+
+        # Valeurs z-scores décalées pour affichage polar (r = z + R_OFFSET)
+        z_vals = list(row_data[marker_cols].values.astype(float))
+        r_vals = [z + R_OFFSET for z in z_vals]
+        r_closed = r_vals + [r_vals[0]]
+
+        # ── Trace NBM (z=0) : zone saine de référence ─────────────────────
+        # fill="toself" avec couleur verte très transparente = "zone saine"
+        # showlegend uniquement sur le 1er subplot pour éviter la répétition
+        fig.add_trace(
+            go.Scatterpolar(
+                r=r_nbm,
+                theta=theta_closed,
+                fill="toself",
+                fillcolor="rgba(39,174,96,0.08)",   # vert très transparent = zone saine
+                line=dict(color="rgba(39,174,96,0.60)", width=1.5, dash="dash"),
+                name="NBM (z=0)",
+                hoverinfo="skip",
+                showlegend=(i == 0),
+                legendgroup="nbm",
+            ),
+            row=r_idx,
+            col=c_idx,
+        )
+
+        # ── Trace profil du nœud ───────────────────────────────────────────
+        node_label = f"Nœud #{int(row_data['node_id'])}"
+        hover_lines = [
+            f"<b>{node_label}</b><br>"
+            f"Score: {float(row_data['blast_score']):.1f}/10 — {cat}<br>"
+            f"<br>"
+        ] + [
+            f"{marker_labels[j]}: z = {z_vals[j]:+.2f}"
+            for j in range(len(marker_labels))
+        ]
+        hover_text = "<br>".join(hover_lines) + "<extra></extra>"
 
         fig.add_trace(
             go.Scatterpolar(
-                r=values_closed,
-                theta=theta,
+                r=r_closed,
+                theta=theta_closed,
                 fill="toself",
-                name=f"Node {int(row_data['node_id'])}",
-                line=dict(color=color),
-                fillcolor=color,
-                opacity=0.4,
+                fillcolor=colors["fill"],
+                line=dict(color=colors["line"], width=2.0),
+                mode="lines+markers",
+                marker=dict(size=5, color=colors["line"]),
+                name=node_label,
+                hovertemplate=hover_text,
                 showlegend=False,
             ),
             row=r_idx,
             col=c_idx,
         )
 
-        # ── Superposition des profils de référence ────────────────────────────
+        # ── Superposition des profils de référence optionnels ──────────────
         if ref_profiles:
-            _ref_colors = ["#22c55e", "#3b82f6", "#f59e0b", "#a855f7"]
+            _ref_colors = ["#2980b9", "#8e44ad", "#16a085", "#d35400"]
             for _ri, (_ref_name, _ref_series) in enumerate(ref_profiles.items()):
-                _ref_markers = [c.replace("_M8", "") for c in marker_cols]
                 _ref_vals = []
-                for m in _ref_markers:
+                for m in marker_labels:
                     _candidates = [k for k in _ref_series.index if m in k]
-                    _ref_vals.append(
-                        float(_ref_series[_candidates[0]]) if _candidates else 0.0
-                    )
+                    _z = float(_ref_series[_candidates[0]]) if _candidates else 0.0
+                    _ref_vals.append(_z + R_OFFSET)
                 _ref_closed = _ref_vals + [_ref_vals[0]]
                 fig.add_trace(
                     go.Scatterpolar(
                         r=_ref_closed,
-                        theta=theta,
+                        theta=theta_closed,
                         mode="lines",
-                        name=_ref_name if i == 0 else None,
+                        name=_ref_name,
                         line=dict(
                             color=_ref_colors[_ri % len(_ref_colors)],
                             width=1.5,
                             dash="dot",
                         ),
-                        opacity=0.75,
+                        opacity=0.80,
                         showlegend=(i == 0),
+                        legendgroup=f"ref_{_ri}",
                     ),
                     row=r_idx,
                     col=c_idx,
                 )
 
-    fig.update_layout(
-        title=dict(text=title, x=0.5),
-        height=300 * n_rows,
-        template="plotly_dark",
+    # ── 8. Mise en page des axes polaires ─────────────────────────────────────
+    # Appliqué à chaque subplot via update_polars (plotly accepte polar, polar2…)
+    polar_layout_common = dict(
+        bgcolor="rgba(15,20,30,0.85)",
+        radialaxis=dict(
+            # Axe radial masqué : on contrôle l'apparence via tickvals/ticktext
+            visible=True,
+            range=[0, r_display_max],
+            # Cercles de grille uniquement aux valeurs z clés (-2, -1, 0, +1, +2)
+            tickvals=r_ticks,
+            ticktext=tick_labels,
+            tickfont=dict(size=8, color="rgba(180,180,180,0.75)"),
+            gridcolor="rgba(100,100,100,0.25)",
+            gridwidth=1,
+            showline=False,
+        ),
+        angularaxis=dict(
+            # Labels des marqueurs (CD117, CD45…) : taille accrue + espacés du bord
+            tickfont=dict(size=11, color="white", family="Arial"),
+            ticklabelstep=1,
+            gridcolor="rgba(100,100,100,0.30)",
+            linecolor="rgba(120,120,120,0.40)",
+            # `rotation` + `direction` pour commencer le premier marqueur en haut
+            rotation=90,
+            direction="clockwise",
+        ),
     )
+
+    # Applique le layout à tous les axes polaires générés par make_subplots
+    polar_updates = {}
+    for k in range(1, n_plots + 1):
+        key = "polar" if k == 1 else f"polar{k}"
+        polar_updates[key] = polar_layout_common
+
+    # ── 9. Layout global ──────────────────────────────────────────────────────
+    cell_size_px = 320   # hauteur de chaque ligne de subplots
+    fig.update_layout(
+        **polar_updates,
+        title=dict(
+            text=title,
+            x=0.5,
+            font=dict(size=16, color="white"),
+        ),
+        # Hauteur dynamique : laisse 80 px de marge par ligne pour les titres
+        height=n_rows * cell_size_px + 80,
+        paper_bgcolor="rgba(10,10,20,0.95)",
+        template="plotly_dark",
+        legend=dict(
+            font=dict(size=10),
+            bgcolor="rgba(20,20,30,0.80)",
+            bordercolor="rgba(150,150,150,0.40)",
+            borderwidth=1,
+            x=1.01,
+            y=1.0,
+            xanchor="left",
+        ),
+        annotations=[
+            # Note de bas de page sur l'interprétation des z-scores
+            dict(
+                text=(
+                    "z-scores vs moelle normale (NBM) | "
+                    "Extérieur du polygone vert = surexpression | "
+                    "Intérieur = sous-expression (ex: CD45-dim, SSC-bas)"
+                ),
+                xref="paper", yref="paper",
+                x=0.5, y=-0.03,
+                showarrow=False,
+                font=dict(size=9, color="rgba(160,160,160,0.70)"),
+                align="center",
+            )
+        ],
+    )
+
+    # Ajuste les titres des subplots (annotation internes) pour qu'ils soient
+    # suffisamment au-dessus du graphique et ne chevauchent pas la toile
+    for ann in fig.layout.annotations:
+        if ann.text and "Nœud" in ann.text:
+            ann.update(
+                font=dict(size=11, color="rgba(220,220,220,0.90)"),
+                yshift=8,
+            )
 
     if output_dir is not None:
         _save_html(fig, output_dir, f"blast_radar_{timestamp}.html")
