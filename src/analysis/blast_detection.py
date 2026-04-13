@@ -222,57 +222,55 @@ def score_nodes_for_blasts(
 
     Dans cet espace :
       • z ≈ 0   → le marqueur est au niveau médian de la moelle normale
-      • z > +1  → surexpression significative vs moelle normale (blaste potentiel)
-      • z < −1  → sous-expression significative vs moelle normale (CD45-dim, SSC-bas)
+      • z > +0.5 → surexpression au-dessus du NBM (seuil de sensibilité)
+      • z < −0.5 → sous-expression en-dessous du NBM (CD45-dim, SSC-bas)
 
-    ── Logique de contribution directionnelle ──────────────────────────────────
+    ── Logique de contribution directionnelle (3 règles) ───────────────────────
 
-    Seuil de déclenchement : ±1 écart-type (z = ±1) pour filtrer le bruit
-    intra-population normale et ne capturer que les déviations biologiquement
-    significatives conformes aux critères ELN 2022 / score d'Ogata.
+    Seuil de déclenchement : ±0.5 SD (abaissé vs l'ancienne valeur de 1.0 SD
+    pour capturer les blastes matures ayant perdu une partie de leur LAIP).
 
-      Marqueurs à poids positif (CD34, CD117, HLA-DR, CD33, CD13) :
-        → Contribuent quand z > +1.0 (surexpression > 1 SD au-dessus du NBM).
-        → Contribution = w × max(0, z − 1.0)
-        → Interprétation ELN 2022 : CD34++ ou CD117++ = LAIP positif.
+      1. Marqueurs blastiques à poids positif (CD34, CD117, HLA-DR, CD33, CD13) :
+           → +points si z > +0.5 (surexpression dès 0.5 SD au-dessus du NBM).
+           → Contribution = w × max(0, z − 0.5)
+           → Interprétation ELN 2022 : CD34++ ou CD117++ = LAIP positif.
 
-      Marqueurs à poids négatif (CD45, SSC) :
-        → Contribuent quand z < −1.0 (sous-expression > 1 SD en-dessous du NBM).
-        → Contribution = |w| × max(0, −z − 1.0)
-        → Interprétation Ogata : CD45-dim et SSC-bas = zone « blasts gate ».
+      2. Marqueurs de maturation à poids négatif (CD45, SSC) — récompense :
+           → +points si z < −0.5 (sous-expression caractéristique des blastes).
+           → Contribution = |w| × max(0, −z − 0.5)
+           → Interprétation Ogata : CD45-dim / SSC-bas = zone « blasts gate ».
 
-      Marqueurs frein (CD19, CD3) :
-        → Poids négatif, contribution quand z > +1.0.
-        → Soustrait du score → pénalise les populations lymphoïdes surexprimées.
+      3. Marqueurs de maturation à poids négatif (CD45, SSC) — PÉNALITÉ :
+           → −points si z > 0 (surexpression = cellule mature normale).
+           → Pénalité = |w| × max(0, z)
+           → Élimine les faux positifs : lymphocytes CD45-bright, granulocytes
+             SSC-high, monocytes accumuleraient sinon des points sur d'autres
+             marqueurs sans être punis par leur CD45/SSC normal.
 
-    ── Calibration sur BLAST110 (P1, arcsinh/5) ────────────────────────────────
+    ── Calibration attendue (arcsinh/5, référence NBM médiane+std) ─────────────
 
-    Sur le dataset BLAST110_100_P1 (26 154 blastes annotés vs 90 254 normaux,
-    arcsinh cofactor=5, référence NBM médiane+std) :
-
-      CD34 Cy55  : z_blast = +2.07,  z_normal = +0.20  → contrib_blast = 3.20
-      CD117      : z_blast = +1.54,  z_normal = +0.19  → contrib_blast = 1.34
-      SSC-A      : z_blast = −2.42,  z_normal = −0.65  → contrib_blast = 1.41
-      Score blast /10 ≈ 5.18  vs  score normal /10 ≈ 0.00  ✓
+      Blaste typique  (CD34++, CD117+, CD45-dim, SSC-bas) → score ≈ 6–8 / 10
+      Lymphocyte sain (CD45-bright, SSC-bas, CD34−)       → score ≈ 0–1 / 10
+      Granulocyte sain (SSC-high, CD45+, CD34−)           → score ≈ 0   / 10
 
     ── Normalisation du score final ────────────────────────────────────────────
 
-    Score brut divisé par le maximum théorique (somme |poids| non nuls) × 10.
-    Clampé dans [0, 10].
+    Score brut clampé à 0 (pas de score négatif), puis normalisé par le maximum
+    théorique (somme des |poids| non nuls) × 10, et clampé dans [0, 10].
 
     Args:
         X_norm: Matrice **z-scorée** [n_nodes, n_markers].
                 Axe 0 = nœuds SOM, axe 1 = marqueurs.
                 Produite par compute_reference_normalization() avec mode="zscore".
-                z ≈ 0 = niveau NBM ; z > 1 = surexpression ; z < −1 = sous-expr.
+                z ≈ 0 = niveau NBM ; z > 0.5 = surexpression ; z < −0.5 = sous-expr.
         marker_names: Noms des marqueurs (colonnes de X_norm, dans le même ordre).
         weights: Poids pré-calculés (optionnel).
                  Si None, calculés automatiquement via build_blast_weights().
 
     Returns:
         np.ndarray de forme (n_nodes,), valeurs dans [0.0, 10.0].
-        Score = 0.0 → aucune déviation > 1 SD dans aucun marqueur diagnostique.
-        Score ≈ 5.0 → signature blastique typique (CD34++ + CD117++ + SSC-bas).
+        Score = 0.0 → aucune déviation blastique détectée (ou cellule mature pénalisée).
+        Score ≈ 6–8 → signature blastique typique (CD34++ + CD117++ + CD45-dim).
 
     Example:
         >>> ref_med, ref_std = compute_reference_stats(X_nbm, marker_names)
@@ -293,13 +291,19 @@ def score_nodes_for_blasts(
     for j, (marker, w) in enumerate(zip(marker_names, W)):
         z = X_norm[:, j]
         if w > 0:
-            # Contribution si surexprimé > 1 SD au-dessus du NBM (z > +1)
-            scores_raw += w * np.maximum(0.0, z - 1.0)
-        elif w < 0:
-            # Contribution si sous-exprimé > 1 SD en-dessous du NBM (z < -1)
-            scores_raw += (-w) * np.maximum(0.0, -z - 1.0)
+            # Baisse du seuil à 0.5 SD pour capter les blastes même s'ils sont peu brillants
+            scores_raw += w * np.maximum(0.0, z - 0.5)
 
-    # Normalisation → [0, 10]
+        elif w < 0:
+            # CD45-dim ou SSC-bas (z < -0.5) DONNE des points
+            scores_raw += (-w) * np.maximum(0.0, -z - 0.5)
+
+            # PÉNALITÉ : CD45-bright ou SSC-haut (z > 0) RETIRE des points !
+            # Élimine les cellules matures (lymphocytes, monocytes, granulos normaux)
+            scores_raw -= (-w) * np.maximum(0.0, z)
+
+    # Normalisation stricte pour éviter les scores négatifs
+    scores_raw = np.maximum(0.0, scores_raw)
     scores_10 = np.clip(scores_raw / max_theoretical * 10.0, 0.0, 10.0)
     return scores_10
 

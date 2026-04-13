@@ -1482,6 +1482,65 @@ class FlowSOMPipeline:
                     # sur gating_figures ne se reflètent pas automatiquement.
                     _mpl_figures.update(gating_figures)
 
+                    # ── Radar MRD blast (Porte 2) — généré directement depuis les
+                    # données de scoring disponibles dans le pipeline principal,
+                    # indépendamment de population_mapping.enabled.
+                    # Permet d'avoir le radar même si population_mapping est désactivé.
+                    if (
+                        viz_save
+                        and mrd_result is not None
+                        and "fig_mrd_blast_radar" not in _plotly_figures
+                        and (_x_norm_arr is not None or _node_medians_arr is not None)
+                        and _marker_names_list
+                    ):
+                        try:
+                            from flowsom_pipeline_pro.src.analysis.blast_detection import (
+                                build_blast_score_dataframe,
+                                build_blast_weights,
+                            )
+                            from flowsom_pipeline_pro.src.visualization.population_viz import (
+                                plot_mrd_blast_radar,
+                            )
+
+                            # Utiliser X_norm si disponible (normalisé vs référence NBM),
+                            # sinon z-scorer node_medians intra-dataset
+                            if _x_norm_arr is not None:
+                                _blast_X = _x_norm_arr
+                            else:
+                                # Fallback : z-scoring intra-dataset sur node_medians
+                                _m_arr = _node_medians_arr.astype(float)
+                                _center = np.nanmean(_m_arr, axis=0)
+                                _scale = np.nanstd(_m_arr, axis=0)
+                                _scale[_scale == 0] = 1.0
+                                _blast_X = (_m_arr - _center) / _scale
+
+                            _n_nodes_blast = _blast_X.shape[0]
+                            _node_ids_blast = np.arange(_n_nodes_blast)
+                            _blast_weights = build_blast_weights(_marker_names_list)
+                            _blast_df = build_blast_score_dataframe(
+                                node_ids=_node_ids_blast,
+                                X_norm=_blast_X,
+                                marker_names=_marker_names_list,
+                                weights=_blast_weights,
+                            )
+                            _mrd_per_node_list = (
+                                mrd_result.per_node if mrd_result is not None else None
+                            )
+                            _fig_mrd_radar = plot_mrd_blast_radar(
+                                blast_df=_blast_df,
+                                mrd_per_node=_mrd_per_node_list,
+                                output_dir=output_dir / "plots",
+                                timestamp=timestamp,
+                            )
+                            if _fig_mrd_radar is not None:
+                                _plotly_figures["fig_mrd_blast_radar"] = _fig_mrd_radar
+                                _logger.info("Radar MRD blast (Porte 2) généré depuis pipeline principal.")
+                        except Exception as _radar_exc:
+                            _logger.warning(
+                                "Radar MRD blast (pipeline principal) échoué (non bloquant): %s",
+                                _radar_exc,
+                            )
+
                     # Visualisation MRD
                     if viz_save and mrd_result is not None:
                         _viz_cfg_mrd = getattr(config, "visualization", None)
