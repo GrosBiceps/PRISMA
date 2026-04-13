@@ -33,6 +33,7 @@ from flowsom_pipeline_pro.src.core.normalizers import DataNormalizer
 from flowsom_pipeline_pro.src.core.gating import PreGating
 from flowsom_pipeline_pro.src.core.auto_gating import AutoGating
 from flowsom_pipeline_pro.src.utils.logger import GatingLogger, get_logger
+from flowsom_pipeline_pro.src.utils.marker_harmonizer import harmonize_marker_names
 from flowsom_pipeline_pro.src.utils.validators import (
     check_nan,
     check_min_cells,
@@ -515,7 +516,53 @@ def preprocess_combined(
     if not samples:
         return [], {}, {}
 
-    # ── 1. Intersection des marqueurs communs ─────────────────────────────────
+    # ── 1. Harmonisation des noms de marqueurs + intersection ─────────────────
+    #
+    # Problème : "$PnS" instable selon l'export — "CD34 Cy55" vs "CD34",
+    # "CD13 BV421" vs "CD13". Sans harmonisation, l'intersection exclut ces
+    # marqueurs alors qu'ils sont présents dans tous les fichiers.
+    #
+    # Solution :
+    #   a) Extraire les noms canoniques (partie avant le premier espace) depuis
+    #      l'union de tous les var_names pour construire la liste cible.
+    #   b) Harmoniser chaque sample EN PLACE avant le calcul d'intersection.
+
+    # a) Liste cible canonique = union des préfixes de tous les marqueurs
+    all_raw: List[str] = []
+    for s in samples:
+        all_raw.extend(s.var_names)
+    # Dédupliquer en préservant l'ordre d'apparition
+    seen_raw: set = set()
+    all_raw_unique = [m for m in all_raw if not (m in seen_raw or seen_raw.add(m))]  # type: ignore[func-returns-value]
+
+    # Extraire le préfixe canonique (avant le premier espace) de chaque nom brut
+    canonical_set: dict = {}  # canonical → premier nom brut rencontré
+    for raw in all_raw_unique:
+        canon = raw.split(" ")[0]
+        if canon not in canonical_set:
+            canonical_set[canon] = raw
+    target_markers: List[str] = list(canonical_set.keys())
+
+    # b) Harmoniser chaque sample EN PLACE
+    n_harmonized_total = 0
+    for s in samples:
+        rename_map = harmonize_marker_names(s.var_names, target_markers)
+        renames = {src: dst for src, dst in rename_map.items() if src != dst}
+        if renames:
+            s.data.rename(columns=renames, inplace=True)
+            n_harmonized_total += len(renames)
+            _logger.debug(
+                "%s : %d colonne(s) harmonisée(s) : %s",
+                s.name, len(renames), renames,
+            )
+
+    if n_harmonized_total:
+        _logger.info(
+            "Harmonisation panel : %d renommage(s) effectué(s) sur %d fichiers.",
+            n_harmonized_total, len(samples),
+        )
+
+    # Intersection sur les noms harmonisés
     common_markers: List[str] = list(samples[0].var_names)
     for s in samples[1:]:
         s_set = set(s.var_names)
@@ -526,8 +573,14 @@ def preprocess_combined(
         return [], {}, {}
 
     _logger.info("Panel commun (intersection): %d marqueurs", len(common_markers))
+    _logger.info(
+        "Marqueurs retenus dans le panel commun : %s",
+        common_markers,
+    )
+
     missing_summary: dict = {}
     for s in samples:
+        # Signaler uniquement les marqueurs non-techniques réellement absents
         missing = [m for m in s.var_names if m not in common_markers]
         if missing:
             missing_summary[s.name] = missing
