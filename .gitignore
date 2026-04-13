@@ -57,3 +57,16 @@ runtime_hook_debug.py
 
 # ─── Claude Code (outils dev locaux, pas nécessaires au projet) ───────────────
 .claude/
+
+# ─── Scripts locaux / expérimentaux (ne jamais pusher) ───────────────────────
+analyze_results.py
+benchmark_tmp.py
+hyperparametersv5.py
+hyperparametersv5 copy.py
+optimize_optuna_mrd.py
+optimize_hyperparameters.py
+optimize_hyperparameters_v4.py
+results_grid_search_v4.csv
+
+# ─── Résultats Optuna (données locales lourdes) ───────────────────────────────
+Résults/Optuna_MRD/
