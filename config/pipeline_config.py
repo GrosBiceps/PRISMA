@@ -167,11 +167,16 @@ class DownsamplingConfig:
 @dataclass
 class HarmonyParamsConfig:
     sigma: float = 0.05
-    nclust: Optional[int] = 30       # None = auto (N/30, très lent sur grands datasets)
-    block_size: float = 0.20         # Fraction de cellules par bloc (défaut harmonypy: 0.05 = 20 blocs)
+    nclust: Optional[int] = 30  # None = auto (N/30, très lent sur grands datasets)
+    block_size: float = (
+        0.20  # Fraction de cellules par bloc (défaut harmonypy: 0.05 = 20 blocs)
+    )
     max_iter: int = 10
-    max_iter_kmeans: int = 10        # Itérations K-means internes (défaut harmonypy: 20)
+    max_iter_kmeans: int = 10  # Itérations K-means internes (défaut harmonypy: 20)
     verbose: bool = False
+    # Liste des marqueurs à aligner avec Harmony.
+    # Liste vide = aligner tous les marqueurs du clustering (comportement historique).
+    markers_to_align: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -628,15 +633,27 @@ class PipelineConfig:
                     cfg.data_integration.harmony_params.sigma = float(hp["sigma"])
                 if "nclust" in hp:
                     v = hp["nclust"]
-                    cfg.data_integration.harmony_params.nclust = int(v) if v is not None else None
+                    cfg.data_integration.harmony_params.nclust = (
+                        int(v) if v is not None else None
+                    )
                 if "block_size" in hp:
-                    cfg.data_integration.harmony_params.block_size = float(hp["block_size"])
+                    cfg.data_integration.harmony_params.block_size = float(
+                        hp["block_size"]
+                    )
                 if "max_iter" in hp:
                     cfg.data_integration.harmony_params.max_iter = int(hp["max_iter"])
                 if "max_iter_kmeans" in hp:
-                    cfg.data_integration.harmony_params.max_iter_kmeans = int(hp["max_iter_kmeans"])
+                    cfg.data_integration.harmony_params.max_iter_kmeans = int(
+                        hp["max_iter_kmeans"]
+                    )
                 if "verbose" in hp:
                     cfg.data_integration.harmony_params.verbose = bool(hp["verbose"])
+                if "markers_to_align" in hp:
+                    cfg.data_integration.harmony_params.markers_to_align = [
+                        str(m).strip()
+                        for m in (hp["markers_to_align"] or [])
+                        if str(m).strip()
+                    ]
 
         # Validation
         cfg._validate()
@@ -765,6 +782,12 @@ class PipelineConfig:
                 "Désactivation du mode asymétrique."
             )
             self.pregate.mode_blastes_vs_normal = False
+
+        if not isinstance(self.data_integration.harmony_params.markers_to_align, list):
+            raise TypeError(
+                "Configuration: data_integration.harmony_params.markers_to_align "
+                "doit être une liste de chaînes."
+            )
 
     # ------------------------------------------------------------------
     # Utilitaires

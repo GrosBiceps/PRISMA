@@ -61,7 +61,7 @@ _logger = get_logger("services.clustering")
 # ── Cache diagnostique Harmony ────────────────────────────────────────────────
 # Stocke les figures générées lors du dernier run_clustering pour injection
 # dans les rapports HTML/PDF sans modifier la signature de run_clustering.
-_HARMONY_DIAG: dict = {}   # {"plotly": go.Figure | None, "mpl": mpl.Figure | None}
+_HARMONY_DIAG: dict = {}  # {"plotly": go.Figure | None, "mpl": mpl.Figure | None}
 
 
 def _build_harmony_diag(
@@ -97,16 +97,24 @@ def _build_harmony_diag(
         # ── PCA commune (fit sur avant, transform avant + après) ──────────────
         pca = _PCA(n_components=2, random_state=42)
         pc_before = pca.fit_transform(Xb)
-        pc_after  = pca.transform(Xa)
+        pc_after = pca.transform(Xa)
 
         var_exp = pca.explained_variance_ratio_
-        xlabel = f"PC1 ({var_exp[0]*100:.1f}%)"
-        ylabel = f"PC2 ({var_exp[1]*100:.1f}%)"
+        xlabel = f"PC1 ({var_exp[0] * 100:.1f}%)"
+        ylabel = f"PC2 ({var_exp[1] * 100:.1f}%)"
 
         # ── Couleurs par condition ────────────────────────────────────────────
         _PALETTE = [
-            "#667eea", "#f093fb", "#4facfe", "#43e97b", "#fa709a",
-            "#fee140", "#a18cd1", "#ffecd2", "#89f7fe", "#ff9a9e",
+            "#667eea",
+            "#f093fb",
+            "#4facfe",
+            "#43e97b",
+            "#fa709a",
+            "#fee140",
+            "#a18cd1",
+            "#ffecd2",
+            "#89f7fe",
+            "#ff9a9e",
         ]
         color_map = {c: _PALETTE[i % len(_PALETTE)] for i, c in enumerate(unique_conds)}
         colors_arr = _np.array([color_map[c] for c in conds])
@@ -117,7 +125,8 @@ def _build_harmony_diag(
             from plotly.subplots import make_subplots as _msp
 
             fig_p = _msp(
-                rows=1, cols=2,
+                rows=1,
+                cols=2,
                 subplot_titles=("Avant correction Harmony", "Après correction Harmony"),
                 horizontal_spacing=0.08,
             )
@@ -137,7 +146,8 @@ def _build_harmony_diag(
                         showlegend=True,
                         **shared,
                     ),
-                    row=1, col=1,
+                    row=1,
+                    col=1,
                 )
                 fig_p.add_trace(
                     _go.Scattergl(
@@ -146,7 +156,8 @@ def _build_harmony_diag(
                         showlegend=False,
                         **shared,
                     ),
-                    row=1, col=2,
+                    row=1,
+                    col=2,
                 )
 
             fig_p.update_xaxes(title_text=xlabel)
@@ -168,22 +179,26 @@ def _build_harmony_diag(
         # ── Figure Matplotlib (fallback PDF) ─────────────────────────────────
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as _plt
 
-            fig_m, axes = _plt.subplots(1, 2, figsize=(12, 4.5),
-                                         facecolor="#1e1e2e")
+            fig_m, axes = _plt.subplots(1, 2, figsize=(12, 4.5), facecolor="#1e1e2e")
             for ax, (pc_data, title) in zip(
                 axes,
-                [(pc_before, "Avant correction Harmony"),
-                 (pc_after,  "Après correction Harmony")],
+                [
+                    (pc_before, "Avant correction Harmony"),
+                    (pc_after, "Après correction Harmony"),
+                ],
             ):
                 ax.set_facecolor("#1e1e2e")
                 for cond in unique_conds:
                     mask = conds == cond
                     ax.scatter(
-                        pc_data[mask, 0], pc_data[mask, 1],
-                        s=1.5, alpha=0.5,
+                        pc_data[mask, 0],
+                        pc_data[mask, 1],
+                        s=1.5,
+                        alpha=0.5,
                         color=color_map[cond],
                         label=str(cond),
                         rasterized=True,
@@ -197,14 +212,19 @@ def _build_harmony_diag(
 
             handles, labels = axes[0].get_legend_handles_labels()
             fig_m.legend(
-                handles, labels, title="Condition",
-                loc="lower center", ncol=min(len(unique_conds), 5),
-                fontsize=7, framealpha=0.2,
+                handles,
+                labels,
+                title="Condition",
+                loc="lower center",
+                ncol=min(len(unique_conds), 5),
+                fontsize=7,
+                framealpha=0.2,
                 labelcolor="#e2e8f0",
             )
             fig_m.suptitle(
                 f"Correction Harmony — PCA ({min(n_sample, n_total):,} cellules)",
-                color="#e2e8f0", fontsize=11,
+                color="#e2e8f0",
+                fontsize=11,
             )
             fig_m.tight_layout(rect=[0, 0.08, 1, 1])
             _HARMONY_DIAG["mpl"] = fig_m
@@ -315,10 +335,14 @@ def stack_samples(
 
         # PERF-2 : vectorisé — np.full évite la boucle Python sur chaque cellule
         n = X_s.shape[0]
-        all_obs.append(pd.DataFrame({
-            "condition":   np.full(n, sample.condition, dtype=object),
-            "file_origin": np.full(n, sample.name,      dtype=object),
-        }))
+        all_obs.append(
+            pd.DataFrame(
+                {
+                    "condition": np.full(n, sample.condition, dtype=object),
+                    "file_origin": np.full(n, sample.name, dtype=object),
+                }
+            )
+        )
 
     if not all_X:
         raise ValueError("Aucun échantillon valide à empiler")
@@ -626,21 +650,80 @@ def run_clustering(
             import time as _time
 
             hp = getattr(di_cfg, "harmony_params", None)
-            harmony_sigma        = float(getattr(hp, "sigma",           0.05)) if hp else 0.05
-            harmony_nclust       = getattr(hp, "nclust",          30)          if hp else 30
-            harmony_block_size   = float(getattr(hp, "block_size",      0.20)) if hp else 0.20
-            harmony_max_iter     = int(getattr(hp, "max_iter",          10))   if hp else 10
-            harmony_max_iter_km  = int(getattr(hp, "max_iter_kmeans",   10))   if hp else 10
-            harmony_verbose      = bool(getattr(hp, "verbose",          False)) if hp else False
+            harmony_sigma = float(getattr(hp, "sigma", 0.05)) if hp else 0.05
+            harmony_nclust = getattr(hp, "nclust", 30) if hp else 30
+            harmony_block_size = float(getattr(hp, "block_size", 0.20)) if hp else 0.20
+            harmony_max_iter = int(getattr(hp, "max_iter", 10)) if hp else 10
+            harmony_max_iter_km = int(getattr(hp, "max_iter_kmeans", 10)) if hp else 10
+            harmony_verbose = bool(getattr(hp, "verbose", False)) if hp else False
+            markers_to_align_raw = (
+                list(getattr(hp, "markers_to_align", []) or []) if hp else []
+            )
             # nclust None = auto (N/30) — explicitement None si la config le dit
             if harmony_nclust is not None:
                 harmony_nclust = int(harmony_nclust)
 
+            # ── Harmony partiel (biology-first) ────────────────────────────
+            # Si markers_to_align est renseigné, on corrige UNIQUEMENT ces
+            # colonnes techniques (ex: FSC/SSC/CD45) et on préserve les autres
+            # marqueurs biologiques tumoraux (CD34/CD117/...) inchangés.
+            def _marker_key(name: str) -> str:
+                k = str(name).upper().strip().replace(" ", "")
+                for suffix in ("-A", "-H", "-W", "_A", "_H", "_W"):
+                    if k.endswith(suffix):
+                        k = k[: -len(suffix)]
+                        break
+                return k
+
+            selected_keys = [_marker_key(m) for m in selected_markers]
+            align_indices = list(range(X.shape[1]))
+            align_markers = list(selected_markers)
+
+            if markers_to_align_raw:
+                requested = [
+                    str(m).strip() for m in markers_to_align_raw if str(m).strip()
+                ]
+                requested_keys = {_marker_key(m) for m in requested}
+                align_indices = [
+                    i
+                    for i, m_key in enumerate(selected_keys)
+                    if m_key in requested_keys
+                ]
+                align_markers = [selected_markers[i] for i in align_indices]
+
+                missing = [
+                    m for m in requested if _marker_key(m) not in set(selected_keys)
+                ]
+                if missing:
+                    _logger.warning(
+                        "Harmony partiel: marqueurs demandés absents du clustering: %s",
+                        missing,
+                    )
+
+                if not align_indices:
+                    _logger.warning(
+                        "Harmony partiel activé mais aucun marqueur demandé n'est présent "
+                        "dans selected_markers. Harmony est ignoré pour ce run."
+                    )
+                    align_indices = []
+
+            if not align_indices:
+                ho = None
+                X_before_h = None
+                X_harmony = None
+            else:
+                X_harmony = X[:, align_indices]
+                X_before_h = X_harmony.copy()
+
             _logger.info(
-                "Harmony activé — %d cellules × %d marqueurs "
+                "Harmony activé — %d cellules × %d marqueurs à aligner "
                 "(nclust=%s, sigma=%.3f, block_size=%.2f, max_iter=%d)...",
-                X.shape[0], X.shape[1],
-                harmony_nclust, harmony_sigma, harmony_block_size, harmony_max_iter,
+                X.shape[0],
+                len(align_indices),
+                harmony_nclust,
+                harmony_sigma,
+                harmony_block_size,
+                harmony_max_iter,
             )
             _t0 = _time.perf_counter()
 
@@ -650,7 +733,7 @@ def run_clustering(
 
             def _run_harmony_with_fallback(device_str):
                 return harmonypy.run_harmony(
-                    X,
+                    X_harmony,
                     _meta_df,
                     "condition",
                     sigma=harmony_sigma,
@@ -662,54 +745,73 @@ def run_clustering(
                     device=device_str,
                 )
 
-            try:
-                ho = _run_harmony_with_fallback(_device)
-            except RuntimeError as _gpu_err:
-                _msg = str(_gpu_err).lower()
-                if "cuda" in _msg or "out of memory" in _msg or "device" in _msg:
-                    _logger.warning(
-                        "Harmony GPU erreur (%s) — reprise sur CPU.", _gpu_err
-                    )
-                    try:
-                        ho = _run_harmony_with_fallback("cpu")
-                    except Exception as _cpu_err:
+            if align_indices:
+                try:
+                    ho = _run_harmony_with_fallback(_device)
+                except RuntimeError as _gpu_err:
+                    _msg = str(_gpu_err).lower()
+                    if "cuda" in _msg or "out of memory" in _msg or "device" in _msg:
                         _logger.warning(
-                            "Harmony CPU également échoué (%s) — données brutes conservées.",
-                            _cpu_err,
+                            "Harmony GPU erreur (%s) — reprise sur CPU.", _gpu_err
+                        )
+                        try:
+                            ho = _run_harmony_with_fallback("cpu")
+                        except Exception as _cpu_err:
+                            _logger.warning(
+                                "Harmony CPU également échoué (%s) — données brutes conservées.",
+                                _cpu_err,
+                            )
+                            ho = None
+                    else:
+                        _logger.warning(
+                            "Harmony a échoué (%s) — données brutes conservées.",
+                            _gpu_err,
                         )
                         ho = None
-                else:
+                except Exception as _exc:
                     _logger.warning(
-                        "Harmony a échoué (%s) — données brutes conservées.", _gpu_err
+                        "Harmony a échoué (%s) — données brutes conservées.", _exc
                     )
                     ho = None
-            except Exception as _exc:
-                _logger.warning(
-                    "Harmony a échoué (%s) — données brutes conservées.", _exc
-                )
-                ho = None
 
             if ho is not None:
-                # Z_corr retourne déjà [n_cells, n_markers] (propriété transpose en interne)
-                X_corrected = ho.Z_corr
-                if X_corrected.shape == X.shape:
+                # Vérification robuste de l'orientation: harmonypy peut renvoyer
+                # [n_markers, n_cells] selon la version et les wrappers.
+                X_corr_raw = np.asarray(ho.Z_corr, dtype=np.float32)
+                if X_corr_raw.shape == X_harmony.shape:
+                    X_corrected_subset = X_corr_raw
+                elif X_corr_raw.T.shape == X_harmony.shape:
+                    X_corrected_subset = X_corr_raw.T
+                else:
+                    X_corrected_subset = None
+
+                if X_corrected_subset is not None:
                     # ── Diagnostic avant/après (rapide, sous-échantillon) ─────
                     _build_harmony_diag(
-                        X_before=X.copy(),
-                        X_after=X_corrected,
+                        X_before=X_before_h,
+                        X_after=X_corrected_subset,
                         conditions=obs["condition"].values,
                     )
-                    X = X_corrected
+
+                    if len(align_indices) == X.shape[1]:
+                        X = X_corrected_subset
+                    else:
+                        X_updated = X.copy()
+                        X_updated[:, align_indices] = X_corrected_subset
+                        X = X_updated
+
                     _logger.info(
-                        "Harmony terminé en %.1fs — données corrigées injectées dans FlowSOM.",
+                        "Harmony partiel terminé en %.1fs — %d marqueur(s) corrigé(s): %s",
                         _time.perf_counter() - _t0,
+                        len(align_markers),
+                        align_markers,
                     )
                 else:
                     _logger.warning(
                         "Harmony a retourné une matrice de forme inattendue %s "
                         "(attendu %s) — données brutes conservées.",
-                        X_corrected.shape,
-                        X.shape,
+                        X_corr_raw.shape,
+                        X_harmony.shape,
                     )
     # ── Fin intégration Harmony ───────────────────────────────────────────────
 

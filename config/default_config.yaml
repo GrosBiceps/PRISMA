@@ -133,6 +133,22 @@ downsampling:
   max_cells_per_file: 50000 # Nombre maximum de cellules à conserver par fichier après downsampling (ex: 20000, 50000, 100000)
   max_cells_total: 1000000  # Nombre maximum de cellules à conserver au total après downsampling (ex: 500000, 1000000, 2000000)
 
+# Intégration de données (correction d'effet batch)
+# Désactivée par défaut pour éviter toute correction Harmony non souhaitée.
+data_integration:
+  enabled: true           # true = active Harmony pendant le clustering
+  method: "harmony"        # harmony (autres méthodes possibles à terme)
+  harmony_params:
+    # Liste vide = alignement Harmony sur tous les marqueurs.
+    # Recommandé biology-first: aligner seulement les canaux techniques.
+    markers_to_align: ["FSC-A", "SSC-A", "CD45-A"]
+    sigma: 0.05
+    nclust: 30              # null = auto (plus lent)
+    block_size: 0.20
+    max_iter: 10
+    max_iter_kmeans: 10
+    verbose: false
+
 visualization:
   save_plots: true       # true = enregistrer les figures générées (heatmaps, UMAP, etc.)
   umap_enabled: false        # true = calculer UMAP après clustering
