@@ -177,20 +177,46 @@ class PipelineWorker(QThread):
                     _gating_emitted = True
                     try:
                         from flowsom_pipeline_pro.src.models.gate_result import gating_reports
-                        if gating_reports:
-                            n_kept = sum(g.n_kept for g in gating_reports)
-                            n_total = gating_reports[0].n_total if gating_reports else 0
-                            fallbacks = [
-                                g.gate_name for g in gating_reports
-                                if g.warnings or (g.method and "fallback" in g.method.lower())
-                            ]
-                            self.gating_done.emit({
-                                "n_kept": int(n_kept),
-                                "n_total": int(n_total),
+
+                        # Aligner le résumé UI sur la logique Sankey: chaîne COMBINED
+                        # (G1 -> G2 -> G3 -> G4), sans sommer les gates entre elles.
+                        events = pipeline._gating_logger.events
+                        gate_map = {e.gate_name: e for e in events if e.file == "COMBINED"}
+
+                        gate_order = ("G4_cd34", "G3_cd45", "G2_singlets", "G1_debris")
+                        terminal_event = next(
+                            (gate_map[g] for g in gate_order if g in gate_map), None
+                        )
+                        first_event = gate_map.get("G1_debris", terminal_event)
+
+                        if terminal_event is not None and first_event is not None:
+                            n_kept = int(terminal_event.n_after)
+                            n_total = int(first_event.n_before)
+                            n_gates = len(gate_map)
+                        elif gating_reports:
+                            # Fallback défensif en cas d'événements COMBINED absents
+                            n_kept = int(gating_reports[-1].n_kept)
+                            n_total = int(gating_reports[0].n_total)
+                            n_gates = len(gating_reports)
+                        else:
+                            n_kept = 0
+                            n_total = 0
+                            n_gates = 0
+
+                        fallbacks = [
+                            g.gate_name
+                            for g in gating_reports
+                            if g.warnings or (g.method and "fallback" in g.method.lower())
+                        ]
+                        self.gating_done.emit(
+                            {
+                                "n_kept": n_kept,
+                                "n_total": n_total,
                                 "pct_kept": round(n_kept / max(n_total, 1) * 100, 1),
-                                "n_gates": len(gating_reports),
+                                "n_gates": n_gates,
                                 "fallbacks": fallbacks,
-                            })
+                            }
+                        )
                     except Exception:
                         pass  # Non bloquant
 
@@ -204,9 +230,7 @@ class PipelineWorker(QThread):
                     f"{result.n_metaclusters} métaclusters ═══"
                 )
             else:
-                self.log_message.emit(
-                    "═══ Pipeline terminé avec des avertissements ═══"
-                )
+                self.log_message.emit("═══ Pipeline terminé avec des avertissements ═══")
 
             self.finished.emit(result)
 
@@ -264,14 +288,9 @@ class BatchWorker(QThread):
             summary = batch.execute(progress_callback=self._on_file_progress)
 
             self.progress.emit(100)
-            n_ok = sum(
-                1 for _, r in summary.get("results", [])
-                if r is not None and r.success
-            )
+            n_ok = sum(1 for _, r in summary.get("results", []) if r is not None and r.success)
             n_total = len(summary.get("results", []))
-            self.log_message.emit(
-                f"═══ Batch terminé — {n_ok}/{n_total} fichier(s) réussis ═══"
-            )
+            self.log_message.emit(f"═══ Batch terminé — {n_ok}/{n_total} fichier(s) réussis ═══")
             self.finished.emit(summary)
 
         except Exception as exc:
