@@ -43,4 +43,4 @@ mrd_parameters:
     normal_marrow_multiplier: 5.0
   method_jf:
     max_normal_marrow_pct: 0.1
-    min_patho_cells_pct: 50.0
+    min_patho_cells_pct: 10.0

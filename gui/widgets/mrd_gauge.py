@@ -4,19 +4,26 @@ mrd_gauge.py — Widget gauge MRD par méthode.
 
 Affiche pour une méthode donnée :
   - Nom de la méthode
-  - Pourcentage MRD (barre de progression + valeur numérique)
+    - Pourcentage MRD (curseur visuel + valeur numérique)
   - Badge POSITIF / NÉGATIF / INDÉTECTABLE
   - Nombre de nœuds MRD et cellules impliquées
 """
+
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar, QFrame,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QSlider,
+    QFrame,
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QPointF, QRectF
+from PyQt5.QtGui import QFont, QColor, QPainter, QPen
 
 
 # Couleurs Catppuccin Mocha (cohérence avec styles.py)
@@ -30,6 +37,62 @@ _SURFACE1 = "#45475a"
 _BASE = "#1e1e2e"
 _MANTLE = "#181825"
 _TEXT = "#cdd6f4"
+
+
+class SemiCircleGauge(QWidget):
+    """Jauge semi-circulaire compacte pour afficher une valeur entre 0 et 1000."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._value = 0
+        self._color = QColor(_BLUE)
+        self.setMinimumHeight(78)
+
+    def set_value(self, value: int) -> None:
+        self._value = max(0, min(1000, int(value)))
+        self.update()
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+
+        margin = 10.0
+        cx = w / 2.0
+        cy = h - 4.0
+        radius = max(12.0, min((w - 2.0 * margin) / 2.0, h - 12.0))
+        arc_rect = QRectF(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius)
+
+        bg_pen = QPen(QColor(24, 26, 42, 230), 9.0, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(bg_pen)
+        painter.drawArc(arc_rect, 180 * 16, -180 * 16)
+
+        ratio = self._value / 1000.0
+        val_pen = QPen(self._color, 9.0, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(val_pen)
+        painter.drawArc(arc_rect, 180 * 16, int(-180 * 16 * ratio))
+
+        angle = math.pi * (1.0 - ratio)
+        needle_inner = QPointF(
+            cx + (radius - 18.0) * math.cos(angle), cy - (radius - 18.0) * math.sin(angle)
+        )
+        needle_outer = QPointF(
+            cx + (radius - 4.0) * math.cos(angle), cy - (radius - 4.0) * math.sin(angle)
+        )
+        needle_pen = QPen(self._color, 3.0, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(needle_pen)
+        painter.drawLine(needle_inner, needle_outer)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(205, 214, 244, 230))
+        painter.drawEllipse(QPointF(cx, cy), 3.2, 3.2)
 
 
 class MRDGauge(QWidget):
@@ -65,7 +128,7 @@ class MRDGauge(QWidget):
         self.lbl_method = QLabel(self.method_name)
         self.lbl_method.setFont(QFont("Segoe UI", 10, QFont.Bold))
         self.lbl_method.setStyleSheet(
-            f"color: #7a9ccc; background: transparent; letter-spacing: 0.12em; text-transform: uppercase;"
+            "color: #9fb9f2; background: transparent; letter-spacing: 0.12em; text-transform: uppercase;"
         )
         self.lbl_method.setAlignment(Qt.AlignCenter)
         root.addWidget(self.lbl_method)
@@ -81,31 +144,49 @@ class MRDGauge(QWidget):
         )
         root.addWidget(self.lbl_badge)
 
+        # ── Jauge semi-circulaire ──
+        self.arc = SemiCircleGauge()
+        root.addWidget(self.arc)
+
         # ── Valeur MRD ──
         self.lbl_pct = QLabel("—")
         self.lbl_pct.setAlignment(Qt.AlignCenter)
-        self.lbl_pct.setFont(QFont("Segoe UI", 32, QFont.Bold))
-        self.lbl_pct.setStyleSheet(f"color: {_TEXT}; background: transparent; letter-spacing: -0.02em;")
+        self.lbl_pct.setFont(QFont("Segoe UI", 26, QFont.Bold))
+        self.lbl_pct.setStyleSheet(
+            f"color: {_TEXT}; background: transparent; letter-spacing: -0.02em;"
+        )
         root.addWidget(self.lbl_pct)
 
-        # ── Barre de progression ──
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1000)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(10)
-        self.progress.setStyleSheet(f"""
-            QProgressBar {{
-                background: rgba(30, 32, 50, 0.9);
-                border-radius: 5px;
-                border: none;
+        # ── Curseur visuel (non interactif) ──
+        self.cursor = QSlider(Qt.Horizontal)
+        self.cursor.setRange(0, 1000)
+        self.cursor.setValue(0)
+        self.cursor.setFixedHeight(14)
+        self.cursor.setFocusPolicy(Qt.NoFocus)
+        self.cursor.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.cursor.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 5px;
+                background: rgba(20, 22, 36, 0.9);
+                border-radius: 2px;
             }}
-            QProgressBar::chunk {{
-                border-radius: 5px;
+            QSlider::sub-page:horizontal {{
                 background: {_BLUE};
+                border-radius: 2px;
+            }}
+            QSlider::add-page:horizontal {{
+                background: rgba(20, 22, 36, 0.9);
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {_BLUE};
+                border: 1px solid rgba(205, 214, 244, 0.35);
+                width: 9px;
+                margin: -5px 0;
+                border-radius: 4px;
             }}
         """)
-        root.addWidget(self.progress)
+        root.addWidget(self.cursor)
 
         # ── Infos secondaires ──
         sep = QFrame()
@@ -118,13 +199,13 @@ class MRDGauge(QWidget):
 
         self.lbl_nodes = QLabel("— nœuds")
         self.lbl_nodes.setStyleSheet(
-            f"color: #4a4c70; background: transparent; font-size: 10px; font-weight: 600;"
+            "color: #9ea9d8; background: transparent; font-size: 10px; font-weight: 600;"
         )
         self.lbl_nodes.setAlignment(Qt.AlignCenter)
 
         self.lbl_cells = QLabel("— cellules")
         self.lbl_cells.setStyleSheet(
-            f"color: #4a4c70; background: transparent; font-size: 10px; font-weight: 600;"
+            "color: #9ea9d8; background: transparent; font-size: 10px; font-weight: 600;"
         )
         self.lbl_cells.setAlignment(Qt.AlignCenter)
 
@@ -179,7 +260,8 @@ class MRDGauge(QWidget):
 
         # Barre (max représente 5%, clampé)
         bar_val = min(int(pct * 200), 1000)  # 5% → 1000
-        self.progress.setValue(bar_val)
+        self.arc.set_value(bar_val)
+        self.cursor.setValue(bar_val)
 
         # Badge et couleurs
         if positive or n_nodes > 0:
@@ -208,27 +290,41 @@ class MRDGauge(QWidget):
             card_status = "negative"
 
         self._apply_card_style(card_status)
-        self.lbl_pct.setStyleSheet(f"color: {pct_color}; background: transparent; letter-spacing: -0.02em;")
+        self.lbl_pct.setStyleSheet(
+            f"color: {pct_color}; background: transparent; letter-spacing: -0.02em;"
+        )
         self.lbl_badge.setText(badge_text)
         self.lbl_badge.setStyleSheet(
             f"color: {badge_color}; background: {badge_bg}; "
             f"border: 1px solid {badge_border}; "
             f"border-radius: 5px; padding: 0 10px; font-weight: bold; letter-spacing: 0.1em;"
         )
-        self.progress.setStyleSheet(f"""
-            QProgressBar {{
+        self.arc.set_color(pct_color)
+        self.cursor.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 5px;
                 background: rgba(20, 22, 36, 0.9);
-                border-radius: 5px;
-                border: none;
+                border-radius: 2px;
             }}
-            QProgressBar::chunk {{
-                border-radius: 5px;
+            QSlider::sub-page:horizontal {{
                 background: {bar_color};
+                border-radius: 2px;
+            }}
+            QSlider::add-page:horizontal {{
+                background: rgba(20, 22, 36, 0.9);
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {pct_color};
+                border: 1px solid rgba(205, 214, 244, 0.45);
+                width: 9px;
+                margin: -5px 0;
+                border-radius: 4px;
             }}
         """)
 
         # Infos secondaires
-        info_color = "#5a5c80"
+        info_color = "#a4b0de"
         seuil_txt = f" (seuil : {threshold}%)" if threshold else ""
         self.lbl_nodes.setText(f"{n_nodes} nœud{'s' if n_nodes != 1 else ''} MRD{seuil_txt}")
         self.lbl_nodes.setStyleSheet(
@@ -244,9 +340,10 @@ class MRDGauge(QWidget):
         self.lbl_pct.setText("—")
         self.lbl_badge.setText("EN ATTENTE")
         self.lbl_badge.setStyleSheet(
-            f"color: {_SUBTEXT}; background: {_SURFACE1}; "
-            f"border-radius: 6px; padding: 0 8px;"
+            f"color: {_SUBTEXT}; background: {_SURFACE1}; border-radius: 6px; padding: 0 8px;"
         )
-        self.progress.setValue(0)
+        self.arc.set_value(0)
+        self.arc.set_color(_BLUE)
+        self.cursor.setValue(0)
         self.lbl_nodes.setText("— nœuds")
         self.lbl_cells.setText("— cellules")

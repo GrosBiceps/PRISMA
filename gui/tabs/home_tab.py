@@ -69,7 +69,7 @@ class HomeTab(QWidget):
         # État du toggle dénominateur MRD
         # False = toutes cellules patho  |  True = cellules patho CD45+ seulement
         self._denom_cd45_only: bool = False
-        self._raw_mrd_result: Any = None   # MRDResult brut stocké pour recalcul
+        self._raw_mrd_result: Any = None  # MRDResult brut stocké pour recalcul
         self._current_method: str = "all"
         self._build_ui()
 
@@ -184,20 +184,12 @@ class HomeTab(QWidget):
         def _step_line(num: str, text: str) -> QLabel:
             lbl = QLabel(f"{num}. {text}")
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                "color: #c3ceef; font-size: 13px; background: transparent;"
-            )
+            lbl.setStyleSheet("color: #c3ceef; font-size: 13px; background: transparent;")
             return lbl
 
-        left_v.addWidget(
-            _step_line("1", "Importer les dossiers FCS (sain et pathologique).")
-        )
-        left_v.addWidget(
-            _step_line("2", "Vérifier les paramètres SOM, MRD et pré-gating.")
-        )
-        left_v.addWidget(
-            _step_line("3", "Cliquer sur Lancer le Pipeline dans l'étape Exécution.")
-        )
+        left_v.addWidget(_step_line("1", "Importer les dossiers FCS (sain et pathologique)."))
+        left_v.addWidget(_step_line("2", "Vérifier les paramètres SOM, MRD et pré-gating."))
+        left_v.addWidget(_step_line("3", "Cliquer sur Lancer le Pipeline dans l'étape Exécution."))
 
         tip = QLabel(
             "Conseil: si vous relancez une analyse, les checkpoints accélèrent les recalculs."
@@ -238,9 +230,7 @@ class HomeTab(QWidget):
         for feat in features:
             lbl = QLabel(f"• {feat}")
             lbl.setWordWrap(True)
-            lbl.setStyleSheet(
-                "color: #c3ceef; font-size: 13px; background: transparent;"
-            )
+            lbl.setStyleSheet("color: #c3ceef; font-size: 13px; background: transparent;")
             right_v.addWidget(lbl)
 
         right_v.addStretch()
@@ -252,8 +242,7 @@ class HomeTab(QWidget):
         footer = QLabel("Statut actuel: en attente d'une exécution du pipeline")
         footer.setAlignment(Qt.AlignCenter)
         footer.setStyleSheet(
-            "color: #a8b8e6; background: transparent; font-size: 12px; "
-            "font-weight: 600;"
+            "color: #a8b8e6; background: transparent; font-size: 12px; font-weight: 600;"
         )
         c_layout.addWidget(footer)
 
@@ -277,6 +266,10 @@ class HomeTab(QWidget):
         self._patient_card = self._build_patient_card()
         self._results_layout.addWidget(self._patient_card)
 
+        # ── Bande de décision clinique (priorité de lecture) ──
+        self._summary_card = self._build_summary_card()
+        self._results_layout.addWidget(self._summary_card, 0)
+
         # ── Barre de contrôle dénominateur MRD ──
         self._denom_bar = self._build_denom_bar()
         self._results_layout.addWidget(self._denom_bar)
@@ -293,22 +286,11 @@ class HomeTab(QWidget):
         # stretch=0 : prend uniquement sa hauteur naturelle (sizeHint)
         self._results_layout.addWidget(self._gauge_container, 0)
 
-        # ── Résumé clinique ──
-        self._summary_card = self._build_summary_card()
-        # stretch=0 : hauteur fixe, ne compresse pas la grille
-        self._results_layout.addWidget(self._summary_card, 0)
-
         # ── Tableau nœuds MRD (grille de validation) ──
         self._node_table = MRDNodeTable()
-        self._node_table.combo_filter.currentIndexChanged.connect(
-            self._on_node_filter_changed
-        )
-        self._node_table.curated_ratio_changed.connect(
-            self._on_curated_ratio_changed
-        )
-        self._node_table.manually_added_nodes_changed.connect(
-            self._on_manually_added_nodes_changed
-        )
+        self._node_table.combo_filter.currentIndexChanged.connect(self._on_node_filter_changed)
+        self._node_table.curated_ratio_changed.connect(self._on_curated_ratio_changed)
+        self._node_table.manually_added_nodes_changed.connect(self._on_manually_added_nodes_changed)
         # Expanding/Expanding : la grille de validation réclame tout l'espace
         # vertical restant. setMinimumHeight est le filet de sécurité absolu
         # (déjà défini dans MRDNodeTable.__init__, répété ici par cohérence).
@@ -367,14 +349,14 @@ class HomeTab(QWidget):
         return scroll
 
     def _build_denom_bar(self) -> QWidget:
-        """Barre de contrôle pour basculer le dénominateur MRD."""
+        """Barre de contrôle explicite du dénominateur MRD actif."""
         bar = QWidget()
         bar.setObjectName("denomBar")
         bar.setStyleSheet(f"""
             QWidget#denomBar {{
-                background: rgba(36, 38, 58, 0.75);
+                background: rgba(34, 36, 56, 0.78);
                 border-radius: 10px;
-                border: 1px solid rgba(137, 180, 250, 0.14);
+                border: 1px solid rgba(137, 180, 250, 0.18);
             }}
         """)
         layout = QHBoxLayout(bar)
@@ -383,51 +365,59 @@ class HomeTab(QWidget):
 
         icon_lbl = QLabel("÷")
         icon_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        icon_lbl.setStyleSheet("color: #6a7cbf; background: transparent;")
+        icon_lbl.setStyleSheet("color: #8ca2df; background: transparent;")
         layout.addWidget(icon_lbl)
 
-        lbl = QLabel("DÉNOMINATEUR MRD")
+        lbl = QLabel("MODE DÉNOMINATEUR")
         lbl.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        lbl.setStyleSheet(
-            "color: #4a5080; background: transparent; letter-spacing: 0.12em;"
-        )
+        lbl.setStyleSheet("color: #8f97c2; background: transparent; letter-spacing: 0.12em;")
         layout.addWidget(lbl)
 
-        layout.addSpacing(4)
+        self.lbl_denom_active = QLabel("TOTAL PATHO")
+        self.lbl_denom_active.setAlignment(Qt.AlignCenter)
+        self.lbl_denom_active.setFixedHeight(24)
+        self.lbl_denom_active.setStyleSheet(
+            "color: #dbe7ff; background: rgba(137,180,250,0.20); "
+            "border: 1px solid rgba(137,180,250,0.42); border-radius: 6px; "
+            "padding: 0 10px; font-size: 10px; font-weight: 800; letter-spacing: 0.06em;"
+        )
+        layout.addWidget(self.lbl_denom_active)
+
+        layout.addSpacing(6)
 
         self.lbl_denom_status = QLabel("Toutes cellules pathologiques")
-        self.lbl_denom_status.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self.lbl_denom_status.setStyleSheet(f"color: {_TEXT}; background: transparent;")
+        self.lbl_denom_status.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
+        self.lbl_denom_status.setStyleSheet("color: #d3def9; background: transparent;")
         layout.addWidget(self.lbl_denom_status)
 
         self.lbl_denom_count = QLabel("")
         self.lbl_denom_count.setStyleSheet(
-            f"color: {_SUBTEXT}; background: transparent; font-size: 10px;"
+            "color: #b6c3ea; background: transparent; font-size: 10px; font-weight: 600;"
         )
         layout.addWidget(self.lbl_denom_count)
 
         layout.addStretch()
 
-        self.btn_toggle_denom = QPushButton("  Basculer vers CD45+")
+        self.btn_toggle_denom = QPushButton("  Activer mode CD45+")
         self.btn_toggle_denom.setEnabled(False)
         self.btn_toggle_denom.setFixedHeight(30)
         self.btn_toggle_denom.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(137, 180, 250, 0.14);
-                color: #89b4fa;
-                border: 1px solid rgba(137, 180, 250, 0.35);
+                background: rgba(137, 180, 250, 0.18);
+                color: #d4e2ff;
+                border: 1px solid rgba(137, 180, 250, 0.45);
                 border-radius: 7px;
                 padding: 0 14px;
                 font-size: 10px;
                 font-weight: 700;
             }}
             QPushButton:hover {{
-                background: rgba(137, 180, 250, 0.24);
-                border-color: rgba(137, 180, 250, 0.55);
+                background: rgba(137, 180, 250, 0.30);
+                border-color: rgba(137, 180, 250, 0.65);
             }}
             QPushButton:disabled {{
                 background: rgba(69, 71, 90, 0.3);
-                color: #4a4c70;
+                color: #646b93;
                 border-color: rgba(69, 71, 90, 0.4);
             }}
         """)
@@ -461,7 +451,7 @@ class HomeTab(QWidget):
             v.setSpacing(3)
             lbl = QLabel(label.upper())
             lbl.setStyleSheet(
-                f"color: #3a3c58; font-size: 9px; background: transparent; "
+                f"color: #7f88b7; font-size: 9px; background: transparent; "
                 f"font-weight: 700; letter-spacing: 0.1em;"
             )
             val = QLabel("—")
@@ -499,7 +489,7 @@ class HomeTab(QWidget):
 
         self.lbl_run_time = QLabel("")
         self.lbl_run_time.setStyleSheet(
-            f"color: #2e3050; font-size: 9px; background: transparent; font-weight: 600;"
+            "color: #8792bf; font-size: 9px; background: transparent; font-weight: 600;"
         )
         self.lbl_run_time.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.lbl_run_time)
@@ -507,39 +497,51 @@ class HomeTab(QWidget):
         return card
 
     def _build_summary_card(self) -> QWidget:
-        """Carte résumé clinique."""
+        """Bande de décision clinique prioritaire."""
         card = QWidget()
         card.setObjectName("summaryCard")
         card.setStyleSheet(f"""
             QWidget#summaryCard {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 rgba(38, 32, 60, 0.75), stop:1 rgba(28, 24, 48, 0.65));
+                    stop:0 rgba(42, 34, 66, 0.82), stop:1 rgba(25, 26, 46, 0.82));
                 border-radius: 12px;
-                border: 1px solid rgba(180, 190, 255, 0.14);
-                border-left: 3px solid rgba(180, 190, 255, 0.45);
+                border: 1px solid rgba(180, 190, 255, 0.20);
+                border-left: 4px solid rgba(180, 190, 255, 0.65);
             }}
         """)
         v = QVBoxLayout(card)
         v.setContentsMargins(20, 14, 20, 14)
-        v.setSpacing(6)
+        v.setSpacing(5)
 
-        lbl = QLabel("CONCLUSION CLINIQUE")
+        lbl = QLabel("DÉCISION CLINIQUE")
         lbl.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        lbl.setStyleSheet(
-            f"color: #5a5c88; background: transparent; letter-spacing: 0.12em;"
-        )
+        lbl.setStyleSheet("color: #9ca7d8; background: transparent; letter-spacing: 0.12em;")
         v.addWidget(lbl)
 
         self.lbl_clinical = QLabel("—")
-        self.lbl_clinical.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.lbl_clinical.setFont(QFont("Segoe UI", 16, QFont.Bold))
         self.lbl_clinical.setWordWrap(True)
         self.lbl_clinical.setStyleSheet(f"color: {_TEXT}; background: transparent;")
         v.addWidget(self.lbl_clinical)
 
+        self.lbl_decision_ref = QLabel("")
+        self.lbl_decision_ref.setWordWrap(True)
+        self.lbl_decision_ref.setStyleSheet(
+            "color: #c9d5ff; background: transparent; font-size: 11px; font-weight: 600;"
+        )
+        v.addWidget(self.lbl_decision_ref)
+
+        self.lbl_decision_denom = QLabel("")
+        self.lbl_decision_denom.setWordWrap(True)
+        self.lbl_decision_denom.setStyleSheet(
+            "color: #b0bee8; background: transparent; font-size: 10.5px;"
+        )
+        v.addWidget(self.lbl_decision_denom)
+
         self.lbl_clinical_detail = QLabel("")
         self.lbl_clinical_detail.setWordWrap(True)
         self.lbl_clinical_detail.setStyleSheet(
-            f"color: #6a6c90; background: transparent; font-size: 11px;"
+            "color: #9aa7d3; background: transparent; font-size: 11px;"
         )
         v.addWidget(self.lbl_clinical_detail)
 
@@ -606,20 +608,16 @@ class HomeTab(QWidget):
                         "Timepoint",
                         "Timepoint_Num",
                     }
-                    numeric_cols = df.select_dtypes(
-                        include=[np.number]
-                    ).columns.tolist()
+                    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
                     self._marker_cols = [c for c in numeric_cols if c not in _meta_cols]
                     if self._marker_cols:
-                        self._mfi_data = df.groupby("FlowSOM_cluster")[
-                            self._marker_cols
-                        ].mean()
+                        self._mfi_data = df.groupby("FlowSOM_cluster")[self._marker_cols].mean()
         except Exception:
             pass
 
         self._update_patient_info(data["patient_info"])
         self._update_gauges(data["gauges"])
-        self._last_gauges_data: List[Dict] = data["gauges"]   # exposé pour export dashboard
+        self._last_gauges_data: List[Dict] = data["gauges"]  # exposé pour export dashboard
         self._update_summary(data["gauges"], data["patient_info"])
         self._update_node_table(data["nodes"], data["gauges"])
 
@@ -656,6 +654,20 @@ class HomeTab(QWidget):
             self._gauge_row.addWidget(gauge)
             self._gauges.append(gauge)
 
+    def _get_active_denom_text(self) -> str:
+        """Retourne une description lisible du dénominateur actif."""
+        mrd = self._raw_mrd_result
+        if mrd is None:
+            return "Total pathologique"
+
+        n_pre = getattr(mrd, "n_patho_pre_cd45", 0)
+        total_patho = n_pre if n_pre > 0 else getattr(mrd, "total_cells_patho", 0)
+        n_cd45pos = getattr(mrd, "n_patho_cd45pos", 0)
+
+        if self._denom_cd45_only:
+            return f"CD45+ pathologique ({n_cd45pos:,} cellules)"
+        return f"Total pathologique ({total_patho:,} cellules)"
+
     def _update_summary(self, gauges: List[Dict], info: Dict) -> None:
         """Génère le texte de conclusion clinique.
 
@@ -664,6 +676,8 @@ class HomeTab(QWidget):
         """
         if not gauges:
             self.lbl_clinical.setText("Aucune donnée MRD disponible")
+            self.lbl_decision_ref.setText("")
+            self.lbl_decision_denom.setText("")
             self.lbl_clinical_detail.setText("")
             return
 
@@ -678,6 +692,10 @@ class HomeTab(QWidget):
             self.lbl_clinical.setStyleSheet(
                 f"color: {_GREEN}; background: transparent; font-size: 16px;"
             )
+            self.lbl_decision_ref.setText(
+                "Méthodes de référence concordantes: JF/FLO non détectées"
+            )
+            self.lbl_decision_denom.setText(f"Dénominateur actif: {self._get_active_denom_text()}")
             details = [f"{g['method']} : {g['pct']:.4f} %" for g in gauges]
             self.lbl_clinical_detail.setText("  ·  ".join(details))
         else:
@@ -691,19 +709,17 @@ class HomeTab(QWidget):
             if ref is None:
                 ref = max(positives, key=lambda g: g.get("pct", 0))
 
-            self.lbl_clinical.setText(
-                f"MRD Positive — {ref['pct']:.4f} % ({ref['method']})"
-            )
+            self.lbl_clinical.setText(f"MRD Positive — {ref['pct']:.4f} % ({ref['method']})")
             self.lbl_clinical.setStyleSheet(
                 f"color: {_RED}; background: transparent; font-size: 16px;"
             )
+            self.lbl_decision_ref.setText(
+                f"Méthode de référence retenue: {ref['method']} ({ref['pct']:.4f} %)"
+            )
+            self.lbl_decision_denom.setText(f"Dénominateur actif: {self._get_active_denom_text()}")
             details = []
             for g in gauges:
-                status = (
-                    "POSITIF"
-                    if (g.get("positive") or g.get("low_level"))
-                    else "négatif"
-                )
+                status = "POSITIF" if (g.get("positive") or g.get("low_level")) else "négatif"
                 details.append(f"{g['method']} : {g['pct']:.4f} % ({status})")
             self.lbl_clinical_detail.setText("  ·  ".join(details))
 
@@ -715,15 +731,11 @@ class HomeTab(QWidget):
         # Dénominateur : total cellules viables (patho) pour le ratio validé
         mrd = self._raw_mrd_result
         n_pre = getattr(mrd, "n_patho_pre_cd45", 0) if mrd else 0
-        total_viable = n_pre if n_pre > 0 else (
-            getattr(mrd, "total_cells_patho", 0) if mrd else 0
-        )
+        total_viable = n_pre if n_pre > 0 else (getattr(mrd, "total_cells_patho", 0) if mrd else 0)
 
         # Fournir TOUS les nœuds SOM (y compris non-MRD) à ExpertFocusDialog
         all_patient_nodes = adapt_all_nodes(self._raw_mrd_result)
-        self._node_table.set_all_patient_nodes(
-            all_patient_nodes if all_patient_nodes else nodes
-        )
+        self._node_table.set_all_patient_nodes(all_patient_nodes if all_patient_nodes else nodes)
 
         self._node_table.load_nodes(
             nodes,
@@ -735,9 +747,7 @@ class HomeTab(QWidget):
         # Afficher les spider plots pour la sélection initiale
         self._refresh_spider_plots(nodes, method_label="")
 
-    def _on_curated_ratio_changed(
-        self, method: str, ratio: float, n_mrd_cells: int
-    ) -> None:
+    def _on_curated_ratio_changed(self, method: str, ratio: float, n_mrd_cells: int) -> None:
         """
         Slot connecté à MRDNodeTable.curated_ratio_changed.
 
@@ -759,16 +769,16 @@ class HomeTab(QWidget):
             self._gauge_row.addWidget(curated_gauge)
             self._gauges.append(curated_gauge)
 
-        curated_gauge.update_data({
-            "pct":      ratio,
-            "n_cells":  n_mrd_cells,
-            "n_nodes":  sum(
-                1 for c in self._node_table._cards if c.is_included
-            ),
-            "positive": ratio > 0.01,
-            "low_level": 0 < ratio <= 0.01,
-            "positivity_threshold": 0.01,
-        })
+        curated_gauge.update_data(
+            {
+                "pct": ratio,
+                "n_cells": n_mrd_cells,
+                "n_nodes": sum(1 for c in self._node_table._cards if c.is_included),
+                "positive": ratio > 0.01,
+                "low_level": 0 < ratio <= 0.01,
+                "positivity_threshold": 0.01,
+            }
+        )
 
     def _on_manually_added_nodes_changed(self, manual_nodes: list) -> None:
         """
@@ -794,6 +804,7 @@ class HomeTab(QWidget):
         mrd = self._raw_mrd_result
         if mrd is None:
             self.btn_toggle_denom.setEnabled(False)
+            self.lbl_denom_active.setText("TOTAL PATHO")
             self.lbl_denom_status.setText("Toutes cellules pathologiques")
             self.lbl_denom_count.setText("")
             return
@@ -808,19 +819,31 @@ class HomeTab(QWidget):
         cd45_available = n_cd45pos > 0 and n_cd45pos != total_patho
 
         if self._denom_cd45_only:
+            self.lbl_denom_active.setText("CD45+ ACTIF")
+            self.lbl_denom_active.setStyleSheet(
+                "color: #d6fff0; background: rgba(137,220,235,0.20); "
+                "border: 1px solid rgba(137,220,235,0.45); border-radius: 6px; "
+                "padding: 0 10px; font-size: 10px; font-weight: 800; letter-spacing: 0.06em;"
+            )
             self.lbl_denom_status.setText("Cellules pathologiques CD45+")
             self.lbl_denom_status.setStyleSheet(
-                "color: #89dceb; background: transparent; font-size: 10px; font-weight: bold;"
+                "color: #c7f6ff; background: transparent; font-size: 10px; font-weight: bold;"
             )
             self.lbl_denom_count.setText(f"({n_cd45pos:,} cellules)" if n_cd45pos > 0 else "")
-            btn_label = "  Revenir au total patho"
+            btn_label = "  Revenir en mode total patho"
         else:
+            self.lbl_denom_active.setText("TOTAL PATHO")
+            self.lbl_denom_active.setStyleSheet(
+                "color: #dbe7ff; background: rgba(137,180,250,0.20); "
+                "border: 1px solid rgba(137,180,250,0.42); border-radius: 6px; "
+                "padding: 0 10px; font-size: 10px; font-weight: 800; letter-spacing: 0.06em;"
+            )
             self.lbl_denom_status.setText("Toutes cellules pathologiques")
             self.lbl_denom_status.setStyleSheet(
-                f"color: {_TEXT}; background: transparent; font-size: 10px; font-weight: bold;"
+                "color: #d3def9; background: transparent; font-size: 10px; font-weight: bold;"
             )
             self.lbl_denom_count.setText(f"({total_patho:,} cellules)" if total_patho > 0 else "")
-            btn_label = "  Basculer vers CD45+"
+            btn_label = "  Activer mode CD45+"
 
         self.btn_toggle_denom.setText(btn_label)
         self.btn_toggle_denom.setEnabled(cd45_available)
@@ -848,9 +871,7 @@ class HomeTab(QWidget):
             suffix = " (CD45+)" if self._denom_cd45_only else ""
             self.lbl_patient_patho.setText(f"{displayed:,}{suffix}")
 
-    def _recompute_gauges_with_denom(
-        self, mrd: Any, method_used: str
-    ) -> List[Dict]:
+    def _recompute_gauges_with_denom(self, mrd: Any, method_used: str) -> List[Dict]:
         """
         Recalcule les gauges MRD avec le dénominateur choisi.
 
@@ -876,26 +897,30 @@ class HomeTab(QWidget):
         if _show_jf:
             n = getattr(mrd, "mrd_cells_jf", 0)
             p = _pct(n)
-            gauges.append({
-                "method": "JF",
-                "pct": p,
-                "n_cells": n,
-                "n_nodes": getattr(mrd, "n_nodes_mrd_jf", 0),
-                "positive": p > 0,
-                "positivity_threshold": None,
-            })
+            gauges.append(
+                {
+                    "method": "JF",
+                    "pct": p,
+                    "n_cells": n,
+                    "n_nodes": getattr(mrd, "n_nodes_mrd_jf", 0),
+                    "positive": p > 0,
+                    "positivity_threshold": None,
+                }
+            )
 
         if _show_flo:
             n = getattr(mrd, "mrd_cells_flo", 0)
             p = _pct(n)
-            gauges.append({
-                "method": "Flo",
-                "pct": p,
-                "n_cells": n,
-                "n_nodes": getattr(mrd, "n_nodes_mrd_flo", 0),
-                "positive": p > 0,
-                "positivity_threshold": None,
-            })
+            gauges.append(
+                {
+                    "method": "Flo",
+                    "pct": p,
+                    "n_cells": n,
+                    "n_nodes": getattr(mrd, "n_nodes_mrd_flo", 0),
+                    "positive": p > 0,
+                    "positivity_threshold": None,
+                }
+            )
 
         if _show_eln:
             n = getattr(mrd, "mrd_cells_eln", 0)
@@ -903,15 +928,17 @@ class HomeTab(QWidget):
             cfg = getattr(mrd, "config_snapshot", {})
             eln_cfg = cfg.get("eln_standards", {}) if isinstance(cfg, dict) else {}
             threshold = eln_cfg.get("clinical_positivity_pct", 0.1)
-            gauges.append({
-                "method": "ELN 2025",
-                "pct": p,
-                "n_cells": n,
-                "n_nodes": getattr(mrd, "n_nodes_mrd_eln", 0),
-                "positive": p >= threshold,
-                "low_level": (n > 0) and (p < threshold),
-                "positivity_threshold": threshold,
-            })
+            gauges.append(
+                {
+                    "method": "ELN 2025",
+                    "pct": p,
+                    "n_cells": n,
+                    "n_nodes": getattr(mrd, "n_nodes_mrd_eln", 0),
+                    "positive": p >= threshold,
+                    "low_level": (n > 0) and (p < threshold),
+                    "positivity_threshold": threshold,
+                }
+            )
 
         return gauges
 
@@ -979,9 +1006,7 @@ class HomeTab(QWidget):
         "#ffed6f",
     ]
 
-    def _refresh_spider_plots(
-        self, nodes: List[Dict], *, method_label: str = ""
-    ) -> None:
+    def _refresh_spider_plots(self, nodes: List[Dict], *, method_label: str = "") -> None:
         """
         Génère les mini spider plots pour les nœuds MRD filtrés (max 8).
 
@@ -1017,9 +1042,7 @@ class HomeTab(QWidget):
                 f"  ·  {n_nodes} nœud(s)"
             )
         else:
-            title_text = (
-                f"Profils d'Expression — Clusters MRD (Radar)  ·  {n_nodes} nœud(s)"
-            )
+            title_text = f"Profils d'Expression — Clusters MRD (Radar)  ·  {n_nodes} nœud(s)"
         self._spider_lbl.setText(title_text)
 
         angles = np.linspace(0, 2 * np.pi, n_markers, endpoint=False).tolist()
