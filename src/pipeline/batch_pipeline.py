@@ -495,6 +495,10 @@ class BatchPipeline:
         """
         cfg = self.config
         seed = int(cfg.flowsom.seed)
+        # Copie défensive : df_nbm est partagé entre toutes les itérations batch.
+        # Sans copie, un groupby ou sample() concurrent (parallélisation externe)
+        # pourrait interférer avec les opérations d'indexation.
+        df_nbm = df_nbm.copy()
         n_nbm_full = len(df_nbm)
 
         # Priorité 1 : équilibrage conditionnel via stratified_downsampling

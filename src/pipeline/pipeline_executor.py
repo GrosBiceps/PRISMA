@@ -362,19 +362,34 @@ class FlowSOMPipeline:
             )
         return fingerprint
 
+    @staticmethod
+    def _cfg_to_dict(obj: object) -> object:
+        """Sérialise un objet config en dict de manière sûre.
+
+        Utilise dataclasses.asdict() au lieu de vars() pour être compatible
+        avec les dataclasses utilisant __slots__ (vars() lèverait TypeError).
+        Fallback sur str() pour les types non-dataclass.
+        """
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "__dict__"):
+            return vars(obj)
+        return str(obj)
+
     def _build_gating_cache_key(
         self,
         cache: PipelineCheckpointManager,
         input_files: List[str],
     ) -> str:
         cfg = self.config
+        _d = self._cfg_to_dict
         payload = {
             "stage": "post_gating",
             "files": self._build_file_fingerprint(input_files),
-            "pregate": vars(cfg.pregate),
-            "transform": vars(cfg.transform),
-            "normalize": vars(cfg.normalize),
-            "markers": vars(cfg.markers),
+            "pregate": _d(cfg.pregate),
+            "transform": _d(cfg.transform),
+            "normalize": _d(cfg.normalize),
+            "markers": _d(cfg.markers),
             "seed": int(cfg.flowsom.seed),
             "condition_labels_v2": "Sain/Pathologique",
         }
@@ -386,15 +401,16 @@ class FlowSOMPipeline:
         gating_key: str,
     ) -> str:
         cfg = self.config
+        _d = self._cfg_to_dict
         payload = {
             "stage": "post_som",
             "gating_key": gating_key,
-            "flowsom": vars(cfg.flowsom),
-            "gpu": vars(cfg.gpu),
-            "auto_clustering": vars(cfg.auto_clustering),
-            "stratified_downsampling": vars(cfg.stratified_downsampling),
-            "markers": vars(cfg.markers),
-            "downsampling": vars(cfg.downsampling),
+            "flowsom": _d(cfg.flowsom),
+            "gpu": _d(cfg.gpu),
+            "auto_clustering": _d(cfg.auto_clustering),
+            "stratified_downsampling": _d(cfg.stratified_downsampling),
+            "markers": _d(cfg.markers),
+            "downsampling": _d(cfg.downsampling),
         }
         return cache.make_key("post_som", payload)
 

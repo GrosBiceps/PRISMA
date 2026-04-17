@@ -224,8 +224,12 @@ def _filter_area_markers(
                 continue
         cols_keep.append(i)
 
-    if not cols_keep or len(cols_keep) == len(var_names):
-        return X, list(var_names)  # rien à supprimer
+    if not cols_keep:
+        # Aucun marqueur à conserver (cas pathologique) — retourner intact
+        return X, list(var_names)
+    if len(cols_keep) == len(var_names):
+        # Aucun marqueur -H supprimé — retourner intact
+        return X, list(var_names)
 
     n_removed = len(var_names) - len(cols_keep)
     _logger.info(
@@ -546,9 +550,14 @@ def preprocess_combined(
     all_raw: List[str] = []
     for s in samples:
         all_raw.extend(s.var_names)
-    # Dédupliquer en préservant l'ordre d'apparition
+    # Dédupliquer en préservant l'ordre d'apparition (boucle explicite, pas de
+    # side-effect dans comprehension qui repose sur add() retournant None).
     seen_raw: set = set()
-    all_raw_unique = [m for m in all_raw if not (m in seen_raw or seen_raw.add(m))]  # type: ignore[func-returns-value]
+    all_raw_unique: List[str] = []
+    for _m in all_raw:
+        if _m not in seen_raw:
+            seen_raw.add(_m)
+            all_raw_unique.append(_m)
 
     # Extraire le préfixe canonique (suffix-aware pour -A/-H) de chaque nom brut
     canonical_set: dict = {}  # canonical → premier nom brut rencontré
@@ -572,7 +581,9 @@ def preprocess_combined(
             _rename_cache[schema_key] = rename_map
         renames = {src: dst for src, dst in rename_map.items() if src != dst}
         if renames:
-            s.data.rename(columns=renames, inplace=True)
+            # Assignment (pas inplace) pour ne pas muter un DataFrame potentiellement
+            # partagé entre plusieurs références (ex: cache réutilisé).
+            s.data = s.data.rename(columns=renames)
             n_harmonized_total += len(renames)
             _logger.debug(
                 "%s : %d colonne(s) harmonisée(s) : %s",
@@ -588,8 +599,14 @@ def preprocess_combined(
             len(samples),
         )
 
-    # Intersection sur les noms harmonisés
-    common_markers: List[str] = list(samples[0].var_names)
+    # Intersection sur les noms harmonisés (dédupliqué pour éviter les colonnes
+    # en double héritées de fichiers FCS avec des marqueurs répétés, ex: FSC-Width, Time)
+    _seen_cm: set = set()
+    common_markers: List[str] = []
+    for m in samples[0].var_names:
+        if m not in _seen_cm:
+            _seen_cm.add(m)
+            common_markers.append(m)
     for s in samples[1:]:
         s_set = set(s.var_names)
         common_markers = [m for m in common_markers if m in s_set]
@@ -630,7 +647,9 @@ def preprocess_combined(
         var_s = s.var_names
         X_s = s.matrix
         col_idx = [var_s.index(m) for m in common_markers]
-        X_sel = X_s[:, col_idx].astype(np.float32, copy=False)
+        # copy=True : évite le partage de buffer mémoire avec sample.matrix
+        # quand X_s est déjà en float32 (aliasing silencieux sinon).
+        X_sel = X_s[:, col_idx].astype(np.float32, copy=True)
         n = X_sel.shape[0]
         all_X.append(X_sel)
         all_conditions.extend([s.condition] * n)

@@ -9,7 +9,7 @@ mrd_parameters:
     d2_normalization: 109.28
     d2_threshold_high: 25.8
     d2_threshold_moderate: 19.03
-    enabled: false
+    enabled: true
     high_threshold: 2.2
     linear_weight: 0.17
     mahal_boost_factor: 1.03
@@ -43,4 +43,4 @@ mrd_parameters:
     normal_marrow_multiplier: 5.0
   method_jf:
     max_normal_marrow_pct: 0.1
-    min_patho_cells_pct: 10.0
+    min_patho_cells_pct: 50.0

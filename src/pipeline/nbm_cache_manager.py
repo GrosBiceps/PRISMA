@@ -246,6 +246,35 @@ class NBMCacheManager:
             chunks.append(df)
 
         df_all = pd.concat(chunks, ignore_index=True)
+
+        # Supprimer les colonnes dupliquées (ex: FSC-Width, Time présents deux fois
+        # dans certains fichiers FCS) pour éviter l'erreur pyarrow à la sauvegarde.
+        # On garde toujours la PREMIÈRE occurrence (comportement pandas par défaut).
+        if df_all.columns.duplicated().any():
+            dup_col_names = df_all.columns[df_all.columns.duplicated(keep=False)].unique().tolist()
+            # Vérifier si les colonnes dupliquées ont des valeurs identiques
+            non_identical = []
+            for col in dup_col_names:
+                col_data = df_all.loc[:, df_all.columns == col]
+                if col_data.shape[1] > 1:
+                    first = col_data.iloc[:, 0]
+                    for k in range(1, col_data.shape[1]):
+                        if not first.equals(col_data.iloc[:, k]):
+                            non_identical.append(col)
+                            break
+            if non_identical:
+                _logger.error(
+                    "Colonnes dupliquées avec valeurs DIFFÉRENTES détectées : %s. "
+                    "La première occurrence est conservée — vérifiez les fichiers FCS source.",
+                    non_identical,
+                )
+            else:
+                _logger.warning(
+                    "Colonnes dupliquées (valeurs identiques) supprimées avant sauvegarde cache: %s",
+                    dup_col_names,
+                )
+            df_all = df_all.loc[:, ~df_all.columns.duplicated(keep="first")]
+
         n_cells = len(df_all)
 
         try:

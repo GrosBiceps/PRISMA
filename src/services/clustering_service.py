@@ -316,20 +316,22 @@ def stack_samples(
         X_s = sample.matrix
         var_s = sample.var_names
 
-        # Sélectionner et réordonner les marqueurs
-        col_idx = [var_s.index(m) for m in selected_markers if m in var_s]
-        if len(col_idx) != len(selected_markers):
-            missing = [m for m in selected_markers if m not in var_s]
+        # Sélectionner et réordonner les marqueurs.
+        # Lookup O(1) par marqueur via dictionnaire — évite le double appel
+        # O(N×M) de var_s.index() et le risque d'index incorrect si doublons.
+        marker_to_idx = {m: i for i, m in enumerate(var_s)}
+        missing = [m for m in selected_markers if m not in marker_to_idx]
+        if missing:
             _logger.warning(
-                "%s: marqueurs manquants %s — rempli avec 0",
+                "%s: marqueurs manquants %s — colonnes initialisées à 0",
                 sample.name,
                 missing,
             )
 
         X_sel = np.zeros((X_s.shape[0], len(selected_markers)), dtype=np.float64)
         for j, m in enumerate(selected_markers):
-            if m in var_s:
-                X_sel[:, j] = X_s[:, var_s.index(m)]
+            if m in marker_to_idx:
+                X_sel[:, j] = X_s[:, marker_to_idx[m]]
 
         all_X.append(X_sel)
 
@@ -415,9 +417,10 @@ def stack_raw_markers(
 
     has_raw = all(s.raw_data is not None for s in samples)
     if not has_raw:
-        _logger.warning(
+        _logger.debug(
             "raw_data absent dans un ou plusieurs FlowSample — "
-            "utilisation des données transformées pour l'export FCS"
+            "utilisation des données transformées pour l'export FCS "
+            "(normal en mode batch/cache NBM)"
         )
 
     all_X: List[np.ndarray] = []
@@ -474,8 +477,21 @@ def run_clustering(
     if not samples:
         raise ValueError("Aucun échantillon à clusteriser")
 
-    # Sélection des marqueurs
-    selected_markers = select_markers_for_clustering(samples[0].var_names, config)
+    # Sélection des marqueurs depuis l'intersection de tous les panels.
+    # Utiliser l'intersection garantit que selected_markers est présent dans
+    # chaque sample, même si samples[0] n'a pas tous les marqueurs.
+    _common_vars: List[str] = list(samples[0].var_names)
+    for _s in samples[1:]:
+        _s_set = set(_s.var_names)
+        _common_vars = [m for m in _common_vars if m in _s_set]
+    if len(_common_vars) < len(samples[0].var_names):
+        _logger.warning(
+            "Panels hétérogènes détectés : %d marqueurs communs sur %d dans samples[0]. "
+            "Clustering basé sur l'intersection.",
+            len(_common_vars),
+            len(samples[0].var_names),
+        )
+    selected_markers = select_markers_for_clustering(_common_vars, config)
     _logger.info(
         "Marqueurs pour FlowSOM (%d): %s", len(selected_markers), selected_markers
     )
@@ -522,18 +538,21 @@ def run_clustering(
             _s.data = _s.data.copy()
             _s.data[_IDX_COL] = np.arange(len(_s.data), dtype=np.int64)
 
-        df_balanced = equilibrer_pool_flowsom(
-            samples=samples,
-            nbm_ids=nbm_ids,
-            balance_conditions=True,
-            imbalance_ratio=sd_cfg.imbalance_ratio,
-            seed=sd_cfg.seed,
-            allow_oversampling=getattr(sd_cfg, "allow_oversampling", False),
-        )
-
-        # Restaurer les données originales (sans la colonne temporaire _cell_idx)
-        for _s in samples:
-            _s.data = _orig_data_backup[_s.name]
+        try:
+            df_balanced = equilibrer_pool_flowsom(
+                samples=samples,
+                nbm_ids=nbm_ids,
+                balance_conditions=True,
+                imbalance_ratio=sd_cfg.imbalance_ratio,
+                seed=sd_cfg.seed,
+                allow_oversampling=getattr(sd_cfg, "allow_oversampling", False),
+            )
+        finally:
+            # Restaurer les données originales dans tous les cas (exception ou non)
+            # pour éviter que les samples restent pollués avec _cell_idx.
+            for _s in samples:
+                if _s.name in _orig_data_backup:
+                    _s.data = _orig_data_backup[_s.name]
 
         # Reconstruire des FlowSample synthétiques à partir du DataFrame équilibré,
         # un par fichier source, pour conserver condition/file_origin par cellule.
@@ -695,15 +714,19 @@ def run_clustering(
                     m for m in requested if _marker_key(m) not in set(selected_keys)
                 ]
                 if missing:
-                    _logger.warning(
-                        "Harmony partiel: marqueurs demandés absents du clustering: %s",
+                    # Les canaux scatter (FSC-A, SSC-A) sont normalement exclus
+                    # du clustering — c'est attendu, pas une erreur.
+                    _logger.info(
+                        "Harmony partiel: marqueurs demandés non présents dans "
+                        "selected_markers (exclus du clustering, ex: scatter): %s",
                         missing,
                     )
 
                 if not align_indices:
-                    _logger.warning(
-                        "Harmony partiel activé mais aucun marqueur demandé n'est présent "
-                        "dans selected_markers. Harmony est ignoré pour ce run."
+                    _logger.info(
+                        "Harmony partiel: aucun marqueur demandé présent dans "
+                        "selected_markers — Harmony désactivé pour ce run "
+                        "(marqueurs scatter absents du clustering, comportement normal)."
                     )
                     align_indices = []
 
@@ -713,18 +736,21 @@ def run_clustering(
                 X_harmony = None
             else:
                 X_harmony = X[:, align_indices]
-                X_before_h = X_harmony.copy()
+                # Copie pour le diagnostic avant/après uniquement si plusieurs
+                # conditions sont présentes (sinon le diag n'a pas de sens).
+                _n_conditions = len(obs["condition"].unique()) if "condition" in obs.columns else 1
+                X_before_h = X_harmony.copy() if _n_conditions > 1 else None
 
-            _logger.info(
-                "Harmony activé — %d cellules × %d marqueurs à aligner "
-                "(nclust=%s, sigma=%.3f, block_size=%.2f, max_iter=%d)...",
-                X.shape[0],
-                len(align_indices),
-                harmony_nclust,
-                harmony_sigma,
-                harmony_block_size,
-                harmony_max_iter,
-            )
+                _logger.info(
+                    "Harmony activé — %d cellules × %d marqueurs à aligner "
+                    "(nclust=%s, sigma=%.3f, block_size=%.2f, max_iter=%d)...",
+                    X.shape[0],
+                    len(align_indices),
+                    harmony_nclust,
+                    harmony_sigma,
+                    harmony_block_size,
+                    harmony_max_iter,
+                )
             _t0 = _time.perf_counter()
 
             # Sélection device avec fallback CPU si OOM GPU
