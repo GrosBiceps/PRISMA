@@ -1,4 +1,4 @@
-# FlowSOM-Gui — Documentation d'Architecture & Résumé du Dépôt
+# PRISMA — Documentation d'Architecture & Résumé du Dépôt
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green.svg)](https://pypi.org/project/PyQt5/)
@@ -27,7 +27,7 @@
 
 ### Mission Principale
 
-**FlowSOM-Gui** est une application de bureau de grade clinique conçue pour la **détection et la quantification de la Maladie Résiduelle Minimale (MRD)** dans les Leucémies Aiguës Myéloïdes (LAM) à partir de fichiers `.FCS` issus de cytométrie en flux multiparamétrique.
+**PRISMA** est une application de bureau de grade clinique conçue pour la **détection et la quantification de la Maladie Résiduelle Minimale (MRD)** dans les Leucémies Aiguës Myéloïdes (LAM) à partir de fichiers `.FCS` issus de cytométrie en flux multiparamétrique.
 
 ### Problème Clinique Résolu
 
@@ -37,7 +37,7 @@ La MRD post-thérapeutique dans la LAM est l'un des facteurs pronostiques les pl
 - **Fonds de moelle normale variable** : les cellules souches hématopoïétiques saines post-chimiothérapie partagent parfois les mêmes marqueurs que les blastes résiduels.
 - **Variabilité inter-instrument** : les effets "batch" entre acquisitions dégradent la reproductibilité.
 
-**FlowSOM-Gui** répond à ce triple défi en implémentant la stratégie clinique de référence **EuroFlow/ELN 2022** : la **Détection d'Anomalie (DfN — Different from Normal)**, couplée à un moteur de clustering non supervisé (FlowSOM) et une interface de **curation humaine** ("Human-in-the-loop") donnant le contrôle final au clinicien.
+**PRISMA** répond à ce triple défi en implémentant la stratégie clinique de référence **EuroFlow/ELN 2022** : la **Détection d'Anomalie (DfN — Different from Normal)**, couplée à un moteur de clustering non supervisé (FlowSOM) et une interface de **curation humaine** ("Human-in-the-loop") donnant le contrôle final au clinicien.
 
 > **Objectif de performance** : Sensibilité ≥ 0.01% avec un seuil de positivité clinique à 0.1%, conformément aux standards ELN 2022.
 
@@ -275,10 +275,10 @@ L'interface suit le système de design **"The Deep Medical Clarity"** :
 
 ### 4.2 Architecture de la Fenêtre Principale
 
-**`FlowSomAnalyzerPro`** (`gui/main_window.py`) — QMainWindow avec wizard 5 étapes :
+**PRISMA** (`FlowSomAnalyzerPro` dans `gui/main_window.py`) — QMainWindow avec wizard 5 étapes :
 
 ```
-FlowSomAnalyzerPro (QMainWindow)
+PRISMA / FlowSomAnalyzerPro (QMainWindow)
 ├── Sidebar (navigation, indicateurs d'état par étape)
 │   ├── Etape 1 : Accueil
 │   ├── Etape 2 : Import FCS
@@ -442,7 +442,7 @@ flowsom_pipeline_pro/
 │   └── exceptions.py          ← Exceptions custom (ClinicalMathError, etc.)
 │
 ├── gui/                       ← INTERFACE GRAPHIQUE PyQt5
-│   ├── main_window.py         ← ★ FlowSomAnalyzerPro (QMainWindow wizard)
+│   ├── main_window.py         ← ★ PRISMA UI (classe FlowSomAnalyzerPro)
 │   ├── styles.py              ← Stylesheet Catppuccin Mocha
 │   ├── workers.py             ← QThread workers (pipeline, plots)
 │   ├── adapters/
