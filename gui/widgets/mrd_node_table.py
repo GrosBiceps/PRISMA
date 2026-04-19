@@ -134,12 +134,13 @@ class MRDNodeCard(QFrame):
         node: Dict[str, Any],
         mfi_data: Any = None,  # DataFrame MFI (index = node_id)
         marker_cols: List[str] = None,
+        initial_included: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._node = node
         self._node_id: int = int(node.get("node_id", 0))
-        self._is_included: bool = True  # GARDER par défaut
+        self._is_included: bool = bool(initial_included)
         self._mfi_data = mfi_data
         self._marker_cols: List[str] = marker_cols or []
 
@@ -149,7 +150,7 @@ class MRDNodeCard(QFrame):
 
     def _build_ui(self) -> None:
         self.setObjectName("mrdNodeCard")
-        self._apply_card_style(included=True)
+        self._apply_card_style(included=self._is_included)
 
         # Preferred horizontalement : la carte s'étire dans sa cellule de grille
         # sans rétrécir en dessous de son contenu.
@@ -222,13 +223,13 @@ class MRDNodeCard(QFrame):
 
         self._btn_keep = QPushButton("✓  GARDER")
         self._btn_keep.setCheckable(True)
-        self._btn_keep.setChecked(True)
+        self._btn_keep.setChecked(self._is_included)
         self._btn_keep.setFixedHeight(30)
         self._btn_keep.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self._btn_discard = QPushButton("✗  ÉCARTER")
         self._btn_discard.setCheckable(True)
-        self._btn_discard.setChecked(False)
+        self._btn_discard.setChecked(not self._is_included)
         self._btn_discard.setFixedHeight(30)
         self._btn_discard.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -238,7 +239,7 @@ class MRDNodeCard(QFrame):
         self._btn_group.addButton(self._btn_keep, 0)
         self._btn_group.addButton(self._btn_discard, 1)
 
-        self._apply_btn_styles(included=True)
+        self._apply_btn_styles(included=self._is_included)
 
         self._btn_keep.clicked.connect(self._on_keep)
         self._btn_discard.clicked.connect(self._on_discard)
@@ -502,11 +503,14 @@ class MRDNodeTable(QWidget):
 
     curated_ratio_changed = pyqtSignal(str, float, int)
     manually_added_nodes_changed = pyqtSignal(list)
+    verification_commit_requested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._nodes: List[Dict[str, Any]] = []
         self._cards: List[MRDNodeCard] = []
+        # État global des décisions expertes par node_id (indépendant du filtre affiché)
+        self._included_by_id: Dict[int, bool] = {}
         self._total_viable_cells: int = 1
         self._current_method_filter: str = ""
         self._mfi_data: Any = None
@@ -630,6 +634,35 @@ class MRDNodeTable(QWidget):
         self._btn_expert_focus.clicked.connect(self._on_open_expert_focus)
         hdr.addWidget(self._btn_expert_focus)
 
+        # ── Bouton Validation explicite (écriture HTML/FCS) ─────────────────
+        self._btn_commit_verification = QPushButton("✓  Valider la vérification")
+        self._btn_commit_verification.setFixedHeight(30)
+        self._btn_commit_verification.setToolTip(
+            "Valide explicitement la curation experte et demande l'écriture immédiate\n"
+            "du rapport HTML et du FCS pathologique Is_MRD."
+        )
+        self._btn_commit_verification.setStyleSheet("""
+            QPushButton {
+                background: rgba(57,255,138,0.14);
+                color: #39FF8A;
+                border: 1px solid rgba(57,255,138,0.34);
+                border-radius: 0px;
+                font-weight: 800;
+                font-size: 8pt;
+                padding: 0 12px;
+            }
+            QPushButton:hover {
+                background: rgba(57,255,138,0.24);
+                border-color: rgba(57,255,138,0.60);
+                color: #D5FFE8;
+            }
+            QPushButton:pressed {
+                background: rgba(57,255,138,0.32);
+            }
+        """)
+        self._btn_commit_verification.clicked.connect(self._on_commit_verification)
+        hdr.addWidget(self._btn_commit_verification)
+
         # Badge ajouts manuels (caché tant que 0)
         self._lbl_manual_badge = QLabel("")
         self._lbl_manual_badge.setStyleSheet(
@@ -734,6 +767,7 @@ class MRDNodeTable(QWidget):
         self._mfi_data = mfi_data
         self._marker_cols = marker_cols or []
         self._total_viable_cells = max(total_viable_cells, 1)
+        self._included_by_id = {int(n.get("node_id", 0)): True for n in self._nodes}
 
         # Filtre
         self.combo_filter.blockSignals(True)
@@ -750,6 +784,7 @@ class MRDNodeTable(QWidget):
     def clear(self) -> None:
         self._nodes = []
         self._cards = []
+        self._included_by_id = {}
         self._all_patient_nodes = []
         self._manually_added_ids = set()
         self.combo_filter.blockSignals(True)
@@ -778,7 +813,7 @@ class MRDNodeTable(QWidget):
         Retourne la liste des nœuds validés par l'expert (GARDER).
         Utilisé par l'export PDF/CSV.
         """
-        return [c.node_data for c in self._cards if c.is_included]
+        return [n for n in self._nodes if self._included_by_id.get(int(n.get("node_id", 0)), True)]
 
     # ── Construction de la grille ────────────────────────────────────────────
 
@@ -822,10 +857,12 @@ class MRDNodeTable(QWidget):
         cols = min(cols, len(filtered))
 
         for idx, node in enumerate(filtered):
+            node_id = int(node.get("node_id", 0))
             card = MRDNodeCard(
                 node=node,
                 mfi_data=self._mfi_data,
                 marker_cols=self._marker_cols,
+                initial_included=self._included_by_id.get(node_id, True),
                 parent=None,
             )
             card.decisionChanged.connect(self._on_decision_changed)
@@ -868,9 +905,14 @@ class MRDNodeTable(QWidget):
         Recalcule total_mrd_cells et final_ratio après chaque décision.
         Émet curated_ratio_changed pour mettre à jour les jauges.
         """
+        self._included_by_id[int(node_id)] = bool(is_included)
         self._refresh_ratio_badge()
 
-        total_mrd_cells = sum(c.node_data.get("n_patho", 0) for c in self._cards if c.is_included)
+        total_mrd_cells = sum(
+            int(n.get("n_patho", 0))
+            for n in self._nodes
+            if self._included_by_id.get(int(n.get("node_id", 0)), True)
+        )
         final_ratio = (
             total_mrd_cells / self._total_viable_cells * 100.0
             if self._total_viable_cells > 0
@@ -881,11 +923,12 @@ class MRDNodeTable(QWidget):
 
     def _refresh_ratio_badge(self) -> None:
         """Met à jour le badge de ratio validé dans l'en-tête."""
-        total_mrd_cells = sum(c.node_data.get("n_patho", 0) for c in self._cards if c.is_included)
-        if self._total_viable_cells > 0 and self._cards:
+        curated_nodes = self.get_human_curated_results()
+        total_mrd_cells = sum(int(n.get("n_patho", 0)) for n in curated_nodes)
+        if self._total_viable_cells > 0 and self._nodes:
             ratio = total_mrd_cells / self._total_viable_cells * 100.0
-            n_kept = sum(1 for c in self._cards if c.is_included)
-            self._lbl_ratio.setText(f"Validé : {ratio:.4f} %  ({n_kept}/{len(self._cards)} nœuds)")
+            n_kept = len(curated_nodes)
+            self._lbl_ratio.setText(f"Validé : {ratio:.4f} %  ({n_kept}/{len(self._nodes)} nœuds)")
             # Couleur selon seuil 0.01 %
             if ratio > 0.01:
                 self._lbl_ratio.setStyleSheet(
@@ -954,8 +997,42 @@ class MRDNodeTable(QWidget):
             marker_cols=self._marker_cols,
             parent=self,
         )
+        dialog.curation_applied.connect(self._on_expert_focus_curation_applied)
         dialog.nodes_manually_added.connect(self._on_manual_nodes_added)
         dialog.exec_()
+
+    def _on_commit_verification(self) -> None:
+        """Demande explicite de validation finale (HTML/FCS) depuis l'UI."""
+        self.verification_commit_requested.emit(self.combo_filter.currentText())
+
+    def _on_expert_focus_curation_applied(self, payload: Dict[str, Any]) -> None:
+        """Synchronise l'état KEEP/DISCARD global depuis la popup Expert Focus."""
+        included_ids = {
+            int(nid)
+            for nid in payload.get("included_ids", [])
+            if isinstance(nid, (int, float, str)) and str(nid).strip() != ""
+        }
+        if not self._nodes:
+            return
+
+        # Appliquer la décision sur tous les nœuds actuellement suivis en MRD table.
+        for node in self._nodes:
+            nid = int(node.get("node_id", 0))
+            self._included_by_id[nid] = nid in included_ids
+
+        self._refresh_ratio_badge()
+        total_mrd_cells = sum(
+            int(n.get("n_patho", 0))
+            for n in self._nodes
+            if self._included_by_id.get(int(n.get("node_id", 0)), True)
+        )
+        final_ratio = (
+            total_mrd_cells / self._total_viable_cells * 100.0
+            if self._total_viable_cells > 0
+            else 0.0
+        )
+        self.curated_ratio_changed.emit("Curated", final_ratio, total_mrd_cells)
+        self._rebuild_grid()
 
     def _on_manual_nodes_added(self, new_nodes: List[Dict[str, Any]]) -> None:
         """
@@ -968,24 +1045,43 @@ class MRDNodeTable(QWidget):
           4. Émet manually_added_nodes_changed pour que HomeTab puisse
              persister ou afficher l'information.
         """
+        selected_manual_ids = {int(n.get("node_id", 0)) for n in new_nodes}
+        source_nodes = self._all_patient_nodes if self._all_patient_nodes else self._nodes
+        source_by_id = {int(n.get("node_id", 0)): n for n in source_nodes}
+
+        # Supprimer les anciens nœuds manuels non retenus (désélection explicite)
+        previous_manual_ids = set(self._manually_added_ids)
+        manual_removed_ids = previous_manual_ids - selected_manual_ids
+        if manual_removed_ids:
+            self._nodes = [
+                n
+                for n in self._nodes
+                if not (
+                    int(n.get("node_id", 0)) in manual_removed_ids
+                    and n.get("is_mrd_manual", False)
+                    and not (n.get("is_mrd_jf") or n.get("is_mrd_flo") or n.get("is_mrd_eln"))
+                )
+            ]
+            for rid in manual_removed_ids:
+                self._included_by_id.pop(rid, None)
+
         existing_ids = {int(n.get("node_id", 0)) for n in self._nodes}
 
-        added_count = 0
-        for node in new_nodes:
-            nid = int(node.get("node_id", 0))
-            node_copy = dict(node)
-            node_copy["is_mrd_manual"] = True
-            if nid not in existing_ids:
-                self._nodes.append(node_copy)
-                existing_ids.add(nid)
-                self._manually_added_ids.add(nid)
-                added_count += 1
-            else:
-                # Nœud déjà présent → on s'assure juste qu'il est marqué manuel
+        for nid in selected_manual_ids:
+            if nid in existing_ids:
+                # Nœud déjà présent → marquer manuel + forcer état inclus
                 for n in self._nodes:
                     if int(n.get("node_id", 0)) == nid:
                         n["is_mrd_manual"] = True
-                        self._manually_added_ids.add(nid)
+                        break
+            else:
+                base = dict(source_by_id.get(nid, {"node_id": nid}))
+                base["is_mrd_manual"] = True
+                self._nodes.append(base)
+                existing_ids.add(nid)
+            self._included_by_id[nid] = True
+
+        self._manually_added_ids = selected_manual_ids
 
         # Mise à jour du badge
         total_manual = len(self._manually_added_ids)
@@ -995,9 +1091,20 @@ class MRDNodeTable(QWidget):
         else:
             self._lbl_manual_badge.hide()
 
-        if added_count > 0:
-            self._rebuild_grid()
-            self._on_decision_changed(0, True)  # recalcule le ratio
+        self._rebuild_grid()
+        self._refresh_ratio_badge()
+
+        total_mrd_cells = sum(
+            int(n.get("n_patho", 0))
+            for n in self._nodes
+            if self._included_by_id.get(int(n.get("node_id", 0)), True)
+        )
+        final_ratio = (
+            total_mrd_cells / self._total_viable_cells * 100.0
+            if self._total_viable_cells > 0
+            else 0.0
+        )
+        self.curated_ratio_changed.emit("Curated", final_ratio, total_mrd_cells)
 
         self.manually_added_nodes_changed.emit([n for n in self._nodes if n.get("is_mrd_manual")])
 
@@ -1066,5 +1173,3 @@ class MRDMethodFilterProxy(QSortFilterProxyModel):
             return False
         flag_key = _METHOD_FLAG.get(self._method, "")
         return bool(node.get(flag_key, False)) if flag_key else True
-
-

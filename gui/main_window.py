@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import webbrowser
 from datetime import datetime
@@ -65,8 +66,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QSize, QMimeData, QUrl, QByteArray
 from PyQt5.QtGui import QFont, QColor, QDragEnterEvent, QDropEvent, QIcon, QFontDatabase, QFontInfo
+
 try:
     from PyQt5.QtSvg import QSvgWidget
+
     _SVG_AVAILABLE = True
 except ImportError:
     _SVG_AVAILABLE = False
@@ -493,6 +496,9 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._gate_plot_paths: Dict[str, str] = {}
         self._combined_html_path: Optional[str] = None
         self.current_fcs_adata: Optional[Any] = None
+        self._patho_fcs_path: Optional[str] = None  # FCS patho auto-chargé après pipeline
+        self._pending_prescreening: Optional[Dict] = None
+        self._per_file_rename_rules: Dict[str, List] = {}
 
         self._current_step = 0
 
@@ -717,8 +723,8 @@ class FlowSomAnalyzerPro(QMainWindow):
             return w
 
         stats_h.addWidget(_stat_block("<0.1%", "MRD sensitivity", "accent"), 1)
-        stats_h.addWidget(_stat_block("42k+", "Events / sample", "info"), 1)
-        stats_h.addWidget(_stat_block("20×20", "Max SOM grid", "brand"), 1)
+        stats_h.addWidget(_stat_block("No limit", "Events / sample", "info"), 1)
+        stats_h.addWidget(_stat_block("No limit", "Max SOM grid", "brand"), 1)
         stats_h.addWidget(_stat_block("0 ms", "Manual gating", "warm"), 1)
         c.addWidget(stats)
 
@@ -1612,7 +1618,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             cw_layout.addWidget(lbl_ico)
 
         lbl_warn = QLabel(
-            "<b style='color:#FF3D6E; letter-spacing:0.12em;'>⚠ RESEARCH TOOL · NOT FOR CLINICAL USE</b>"
+            "<b style='color:#FF3D6E; letter-spacing:0.12em;'>RESEARCH TOOL · NOT FOR CLINICAL USE</b>"
             "  <span style='color: #EEF2F7;'>Aide à l'analyse et à la visualisation."
             " Ne remplace pas l'expert biologiste/médecin ni les procédures AQ du laboratoire."
             " Les seuils de scoring blastique sont des heuristiques non validées cliniquement.</span>"
@@ -1645,6 +1651,9 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _build_home_tab(self) -> None:
         self._home_tab = HomeTab()
+        self._home_tab.open_html_requested.connect(self._open_html_report)
+        self._home_tab.curation_changed.connect(self._on_curation_changed)
+        self._home_tab.verification_commit_requested.connect(self._on_verification_commit_requested)
         _ico_home = _icon("prisma.dot-plot", "#39FF8A", 16)
         self.tabs.addTab(self._home_tab, _ico_home or QIcon(), "ACCUEIL MRD")
 
@@ -1875,34 +1884,56 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.results_table.setMaximumHeight(280)
         layout.addWidget(self.results_table)
 
-        hdr2 = QHBoxLayout()
+        # ── Barre Vue Combinée : label + bouton interactif sur une seule ligne ──
+        combined_bar = QWidget()
+        combined_bar.setObjectName("combinedBar")
+        combined_bar.setStyleSheet("""
+            QWidget#combinedBar {
+                background: rgba(16,24,37,0.92);
+                border: 1px solid rgba(255,255,255,0.055);
+                border-top: 1px solid rgba(123,82,255,0.35);
+            }
+        """)
+        combined_bar_layout = QHBoxLayout(combined_bar)
+        combined_bar_layout.setContentsMargins(14, 10, 14, 10)
+        combined_bar_layout.setSpacing(12)
+
+        lbl_combined_icon = QLabel("⬡")
+        lbl_combined_icon.setFont(QFont("Segoe UI", 13))
+        lbl_combined_icon.setStyleSheet("color: #7B52FF; background: transparent;")
+        combined_bar_layout.addWidget(lbl_combined_icon)
+
         lbl2 = QLabel("Vue Combinée Nœuds SOM")
         lbl2.setObjectName("subtitleLabel")
-        hdr2.addWidget(lbl2)
-        hdr2.addStretch()
+        lbl2.setStyleSheet(
+            "color: #EEF2F7; font-size: 10pt; font-weight: 600; background: transparent;"
+        )
+        combined_bar_layout.addWidget(lbl2)
+        combined_bar_layout.addStretch()
+
         self.btn_open_combined = QPushButton("  Ouvrir interactif")
         self.btn_open_combined.setObjectName("successBtn")
         self.btn_open_combined.setEnabled(False)
+        self.btn_open_combined.setFixedHeight(32)
         ico_oc = _icon("prisma.external-link", "#11111b")
         if ico_oc:
             self.btn_open_combined.setIcon(ico_oc)
             self.btn_open_combined.setIconSize(QSize(16, 16))
         self.btn_open_combined.clicked.connect(self._open_combined_html)
-        hdr2.addWidget(self.btn_open_combined)
-        layout.addLayout(hdr2)
+        combined_bar_layout.addWidget(self.btn_open_combined)
+        layout.addWidget(combined_bar)
 
         self._results_web = None
-        self._combined_canvas = MatplotlibCanvas(tab, width=10, height=5)
+        # Canvas factice (jamais visible) — conservé pour compatibilité _populate_results
+        self._combined_canvas = MatplotlibCanvas(tab, width=1, height=1)
+        self._combined_canvas.hide()
         self._combined_toolbar = NavigationToolbar(self._combined_canvas, tab)
-        self._combined_toolbar.setObjectName("matplotlibToolbar")
-        layout.addWidget(self._combined_toolbar)
-        layout.addWidget(self._combined_canvas, 1)
+        self._combined_toolbar.hide()
 
         self.txt_summary = QTextEdit()
         self.txt_summary.setReadOnly(True)
-        self.txt_summary.setMaximumHeight(150)
         self.txt_summary.setPlaceholderText("Le résumé de l'analyse apparaîtra ici…")
-        layout.addWidget(self.txt_summary)
+        layout.addWidget(self.txt_summary, 1)
 
         _ico_res = _icon("prisma.heatmap", "#FF3D6E", 16)
         self.tabs.addTab(tab, _ico_res or QIcon(), "RÉSULTATS")
@@ -1918,14 +1949,31 @@ class FlowSomAnalyzerPro(QMainWindow):
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(8)
 
-        self.btn_load_fcs_viz = QPushButton("  Charger FCS")
-        self.btn_load_fcs_viz.setObjectName("primaryBtn")
-        ico_fcs = _icon("prisma.fcs-file", "#11111b")
+        # Bouton recharger le FCS de sortie (patho auto-chargé)
+        self.btn_reload_patho_fcs = QPushButton("  Recharger FCS sortie")
+        self.btn_reload_patho_fcs.setObjectName("ghostBtn")
+        self.btn_reload_patho_fcs.setEnabled(False)
+        ico_reload = _icon("prisma.sync", "#39FF8A")
+        if ico_reload:
+            self.btn_reload_patho_fcs.setIcon(ico_reload)
+            self.btn_reload_patho_fcs.setIconSize(QSize(16, 16))
+        self.btn_reload_patho_fcs.clicked.connect(self._reload_patho_fcs)
+        ctrl_layout.addWidget(self.btn_reload_patho_fcs)
+
+        # Bouton parcourir un autre FCS
+        self.btn_load_fcs_viz = QPushButton("  Parcourir…")
+        self.btn_load_fcs_viz.setObjectName("ghostBtn")
+        ico_fcs = _icon("prisma.fcs-file", "#5BAAFF")
         if ico_fcs:
             self.btn_load_fcs_viz.setIcon(ico_fcs)
             self.btn_load_fcs_viz.setIconSize(QSize(16, 16))
-        self.btn_load_fcs_viz.clicked.connect(self._load_fcs_for_visualization)
+        self.btn_load_fcs_viz.clicked.connect(lambda: self._load_fcs_for_visualization())
         ctrl_layout.addWidget(self.btn_load_fcs_viz)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color: rgba(255,255,255,0.10);")
+        ctrl_layout.addWidget(sep)
 
         ctrl_layout.addWidget(QLabel("Axe X:"))
         self.combo_fcs_x = DarkComboBox()
@@ -1965,7 +2013,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         ctrl_layout.addWidget(self.chk_fcs_all_cells)
 
         self.chk_fcs_jitter = QCheckBox("Jitter")
-        self.chk_fcs_jitter.setChecked(True)
+        self.chk_fcs_jitter.setChecked(False)
         self.chk_fcs_jitter.stateChanged.connect(self._update_fcs_plot)
         ctrl_layout.addWidget(self.chk_fcs_jitter)
 
@@ -2387,7 +2435,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         table.setHorizontalHeaderLabels(
             ["Fichier", "Condition", "Cellules", "Canaux", "Marqueurs ($PnS)"]
         )
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
@@ -2395,6 +2443,8 @@ class FlowSomAnalyzerPro(QMainWindow):
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setAlternatingRowColors(False)
+        table.setWordWrap(True)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         vbox.addWidget(table, 1)
 
         # Label résumé
@@ -2403,6 +2453,15 @@ class FlowSomAnalyzerPro(QMainWindow):
         vbox.addWidget(lbl_sum)
 
         def _populate():
+            try:
+                _populate_inner()
+            except Exception as _exc:
+                import traceback
+
+                lbl_sum.setText(f"Erreur aperçu : {_exc}")
+                self._log(f"Erreur aperçu FCS : {traceback.format_exc()}")
+
+        def _populate_inner():
             rows = []
             for folder, condition in folder_conditions:
                 fcs_files = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() == ".fcs")
@@ -2426,7 +2485,9 @@ class FlowSomAnalyzerPro(QMainWindow):
                 table.setItem(i, 3, ch_item)
 
                 mk_str = ", ".join(m for m in markers if m) if markers else "—"
-                table.setItem(i, 4, QTableWidgetItem(mk_str))
+                mk_item = QTableWidgetItem(mk_str)
+                mk_item.setToolTip(mk_str)
+                table.setItem(i, 4, mk_item)
 
             total_sain = sum(r[2] for r in rows if r[1] == "Sain" and isinstance(r[2], int))
             total_patho = sum(
@@ -2459,11 +2520,20 @@ class FlowSomAnalyzerPro(QMainWindow):
     def _open_rename_dialog(self) -> None:
         """Ouvre l'éditeur complet de renommage des colonnes FCS."""
         import re
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel as _QL
+        from PyQt5.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QHBoxLayout,
+            QPushButton,
+            QLabel as _QL,
+            QTabWidget,
+            QComboBox as _QCombo,
+            QGroupBox,
+        )
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Renommage des colonnes FCS — harmonisation Kaluza")
-        dlg.resize(820, 560)
+        dlg.resize(900, 640)
         dlg.setStyleSheet(self.styleSheet())
         vbox = QVBoxLayout(dlg)
         vbox.setContentsMargins(16, 16, 16, 12)
@@ -2475,21 +2545,110 @@ class FlowSomAnalyzerPro(QMainWindow):
         vbox.addWidget(lbl_title)
 
         lbl_desc = _QL(
-            "Définissez ici le mapping entre les noms bruts des colonnes FCS "
-            "(ex : «CD45 KO», «CD34 Cy55», «SSC-A») et les noms canoniques "
-            "attendus par le pipeline Kaluza (ex : «CD45», «CD34»).\n"
-            "Les colonnes dont le nom source = nom cible ne sont pas modifiées. "
-            "Ces règles sont appliquées avant toute harmonisation automatique."
+            "Deux modes disponibles : «Fichier par fichier» pour des règles spécifiques à chaque FCS, "
+            "«Homogénéisation» pour appliquer les mêmes règles à tous les fichiers."
         )
         lbl_desc.setWordWrap(True)
         lbl_desc.setObjectName("dialogDesc")
         vbox.addWidget(lbl_desc)
 
-        # Barre d'outils
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        # ── Onglets Fichier-par-fichier vs Homogénéisation ──────────────
+        tab_widget = QTabWidget()
+        tab_widget.setStyleSheet(
+            "QTabBar::tab { padding: 6px 18px; font-size: 9pt; }"
+            "QTabBar::tab:selected { color: #5BAAFF; border-bottom: 2px solid #5BAAFF; }"
+        )
 
-        def _mk_btn(label, icon_name, color="#5BAAFF"):
+        # ── Onglet 1 : Fichier par fichier ─────────────────────────────
+        tab_per_file = QWidget()
+        tab_per_file.setStyleSheet("background: transparent;")
+        per_vbox = QVBoxLayout(tab_per_file)
+        per_vbox.setContentsMargins(8, 8, 8, 8)
+        per_vbox.setSpacing(8)
+
+        # Sélecteur de fichier FCS
+        file_sel_row = QHBoxLayout()
+        lbl_file_sel = _QL("Fichier FCS :")
+        lbl_file_sel.setObjectName("dialogDesc")
+        file_sel_row.addWidget(lbl_file_sel)
+
+        combo_files = _QCombo()
+        combo_files.setMinimumWidth(360)
+        combo_files.setStyleSheet(
+            "QComboBox { background: #101825; color: #EEF2F7; border: 1px solid rgba(255,255,255,0.12);"
+            " border-radius: 4px; padding: 4px 10px; } "
+            "QComboBox QAbstractItemView { background: #101825; color: #EEF2F7; }"
+        )
+        file_sel_row.addWidget(combo_files, 1)
+
+        # Collecte tous les FCS disponibles (sain + patho)
+        _all_fcs: List[Path] = []
+        for folder in (self.drop_healthy.path, self.drop_patho.path):
+            if folder and Path(folder).is_dir():
+                _all_fcs += sorted(p for p in Path(folder).iterdir() if p.suffix.lower() == ".fcs")
+        for p in _all_fcs:
+            combo_files.addItem(p.name, str(p))
+        if not _all_fcs:
+            combo_files.addItem("Aucun fichier FCS trouvé")
+
+        per_vbox.addLayout(file_sel_row)
+
+        # Table renommage par fichier
+        per_table = QTableWidget()
+        per_table.setColumnCount(2)
+        per_table.setHorizontalHeaderLabels(["Colonne FCS brute (source)", "Nom cible Kaluza"])
+        per_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        per_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        per_table.setSelectionBehavior(QTableWidget.SelectRows)
+        per_table.setAlternatingRowColors(False)
+        per_table.verticalHeader().setVisible(False)
+        per_table.setMinimumHeight(260)
+        per_vbox.addWidget(per_table, 1)
+
+        # Stockage par fichier : dict {fcs_path_str: [(src, dst), ...]}
+        _per_file_rules: Dict[str, List] = {}
+
+        def _load_per_file(fcs_path_str: str) -> None:
+            """Charge les règles existantes pour ce fichier dans per_table."""
+            per_table.blockSignals(True)
+            per_table.setRowCount(0)
+            rules = _per_file_rules.get(fcs_path_str, [])
+            for src, dst in rules:
+                r = per_table.rowCount()
+                per_table.insertRow(r)
+                per_table.setItem(r, 0, QTableWidgetItem(src))
+                per_table.setItem(r, 1, QTableWidgetItem(dst))
+            per_table.blockSignals(False)
+
+        def _save_per_file(fcs_path_str: str) -> None:
+            """Sauvegarde les règles de per_table pour ce fichier."""
+            rules = []
+            for r in range(per_table.rowCount()):
+                s = per_table.item(r, 0)
+                d = per_table.item(r, 1)
+                src = s.text().strip() if s else ""
+                dst = d.text().strip() if d else ""
+                if src:
+                    rules.append((src, dst))
+            _per_file_rules[fcs_path_str] = rules
+
+        _current_per_file: List[str] = [""]
+
+        def _on_file_changed(idx: int) -> None:
+            if _current_per_file[0]:
+                _save_per_file(_current_per_file[0])
+            fcs_str = combo_files.currentData() or ""
+            _current_per_file[0] = fcs_str
+            _load_per_file(fcs_str)
+
+        combo_files.currentIndexChanged.connect(_on_file_changed)
+        if _all_fcs:
+            _current_per_file[0] = str(_all_fcs[0])
+
+        # Boutons per-file
+        per_btn_row = QHBoxLayout()
+
+        def _mk_btn(label, icon_name, color="#5BAAFF", tbl=None):
             b = QPushButton(f"  {label}")
             b.setObjectName("ghostBtn")
             b.setMinimumHeight(34)
@@ -2499,23 +2658,80 @@ class FlowSomAnalyzerPro(QMainWindow):
                 b.setIconSize(QSize(16, 16))
             return b
 
-        btn_detect = _mk_btn("Détecter colonnes FCS", "prisma.search", "#5BAAFF")
-        btn_add = _mk_btn("Ajouter ligne", "prisma.plus", "#39FF8A")
-        btn_del = _mk_btn("Supprimer sélection", "prisma.trash", "#FF3D6E")
-        btn_clear = _mk_btn("Tout effacer", "prisma.eraser", "#f9e2af")
+        btn_per_detect = _mk_btn("Détecter colonnes", "prisma.search", "#5BAAFF")
+        btn_per_add = _mk_btn("Ajouter ligne", "prisma.plus", "#39FF8A")
+        btn_per_del = _mk_btn("Supprimer sélection", "prisma.trash", "#FF3D6E")
 
-        toolbar.addWidget(btn_detect)
-        toolbar.addWidget(btn_add)
-        toolbar.addWidget(btn_del)
-        toolbar.addWidget(btn_clear)
-        toolbar.addStretch()
+        per_btn_row.addWidget(btn_per_detect)
+        per_btn_row.addWidget(btn_per_add)
+        per_btn_row.addWidget(btn_per_del)
+        per_btn_row.addStretch()
+        per_vbox.addLayout(per_btn_row)
 
-        lbl_count = _QL("0 règle(s)")
-        lbl_count.setObjectName("dialogCount")
-        toolbar.addWidget(lbl_count)
-        vbox.addLayout(toolbar)
+        def _per_detect():
+            fcs_str = combo_files.currentData() or ""
+            if not fcs_str or not Path(fcs_str).exists():
+                QMessageBox.information(dlg, "Détecter", "Sélectionnez d'abord un fichier FCS.")
+                return
+            _, _, col_names = self._read_fcs_header_full(Path(fcs_str))
+            existing = set()
+            for r in range(per_table.rowCount()):
+                it = per_table.item(r, 0)
+                if it:
+                    existing.add(it.text().strip())
+            new_cols = [c for c in col_names if c and c not in existing]
+            for col in new_cols:
+                short = re.sub(
+                    r"\s+(KO|FITC|PE|APC|BV\d+|Cy\d+|PerCP|EF\d+|BUV\d+|"
+                    r"BB\d+|R\d+|AF\d+|V\d+|Pacific[- ]Blue|AlexaFluor\d*"
+                    r"|Pacific\s*Orange|BrilliantViolet\d*)\b.*",
+                    "",
+                    col,
+                    flags=re.IGNORECASE,
+                ).strip()
+                r = per_table.rowCount()
+                per_table.insertRow(r)
+                per_table.setItem(r, 0, QTableWidgetItem(col))
+                per_table.setItem(r, 1, QTableWidgetItem(short))
+            if new_cols:
+                QMessageBox.information(
+                    dlg,
+                    "Colonnes détectées",
+                    f"{len(new_cols)} colonne(s) ajoutée(s) depuis\n{Path(fcs_str).name}",
+                )
 
-        # Table principale
+        def _per_add():
+            r = per_table.rowCount()
+            per_table.insertRow(r)
+            per_table.setItem(r, 0, QTableWidgetItem(""))
+            per_table.setItem(r, 1, QTableWidgetItem(""))
+            per_table.editItem(per_table.item(r, 0))
+
+        def _per_del():
+            rows = sorted({idx.row() for idx in per_table.selectedIndexes()}, reverse=True)
+            for r in rows:
+                per_table.removeRow(r)
+
+        btn_per_detect.clicked.connect(_per_detect)
+        btn_per_add.clicked.connect(_per_add)
+        btn_per_del.clicked.connect(_per_del)
+
+        tab_widget.addTab(tab_per_file, "  Fichier par fichier  ")
+
+        # ── Onglet 2 : Homogénéisation globale ─────────────────────────
+        tab_global = QWidget()
+        tab_global.setStyleSheet("background: transparent;")
+        glob_vbox = QVBoxLayout(tab_global)
+        glob_vbox.setContentsMargins(8, 8, 8, 8)
+        glob_vbox.setSpacing(8)
+
+        lbl_glob = _QL(
+            "Ces règles s'appliquent à TOUS les fichiers FCS, avant les règles fichier-par-fichier."
+        )
+        lbl_glob.setWordWrap(True)
+        lbl_glob.setObjectName("dialogDesc")
+        glob_vbox.addWidget(lbl_glob)
+
         local_table = QTableWidget()
         local_table.setColumnCount(2)
         local_table.setHorizontalHeaderLabels(["Colonne FCS brute (source)", "Nom cible Kaluza"])
@@ -2524,8 +2740,11 @@ class FlowSomAnalyzerPro(QMainWindow):
         local_table.setSelectionBehavior(QTableWidget.SelectRows)
         local_table.setAlternatingRowColors(False)
         local_table.verticalHeader().setVisible(False)
-        local_table.setMinimumHeight(300)
-        vbox.addWidget(local_table, 1)
+        local_table.setMinimumHeight(260)
+        glob_vbox.addWidget(local_table, 1)
+
+        lbl_count = _QL("0 règle(s)")
+        lbl_count.setObjectName("dialogCount")
 
         def _update_count():
             n = local_table.rowCount()
@@ -2540,7 +2759,7 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         local_table.itemChanged.connect(lambda _: _update_count())
 
-        # Charger les règles existantes depuis self.rename_table
+        # Charger les règles globales existantes depuis self.rename_table
         for r in range(self.rename_table.rowCount()):
             src_item = self.rename_table.item(r, 0)
             dst_item = self.rename_table.item(r, 1)
@@ -2552,6 +2771,19 @@ class FlowSomAnalyzerPro(QMainWindow):
             local_table.setItem(row, 1, QTableWidgetItem(dst))
         _update_count()
 
+        glob_btn_row = QHBoxLayout()
+        btn_detect = _mk_btn("Détecter colonnes FCS", "prisma.search", "#5BAAFF")
+        btn_add = _mk_btn("Ajouter ligne", "prisma.plus", "#39FF8A")
+        btn_del = _mk_btn("Supprimer sélection", "prisma.trash", "#FF3D6E")
+        btn_clear = _mk_btn("Tout effacer", "prisma.eraser", "#f9e2af")
+        glob_btn_row.addWidget(btn_detect)
+        glob_btn_row.addWidget(btn_add)
+        glob_btn_row.addWidget(btn_del)
+        glob_btn_row.addWidget(btn_clear)
+        glob_btn_row.addStretch()
+        glob_btn_row.addWidget(lbl_count)
+        glob_vbox.addLayout(glob_btn_row)
+
         def _detect():
             fcs_path: Optional[Path] = None
             for folder in (self.drop_healthy.path, self.drop_patho.path):
@@ -2562,7 +2794,6 @@ class FlowSomAnalyzerPro(QMainWindow):
                             break
                 if fcs_path:
                     break
-
             if fcs_path is None:
                 QMessageBox.information(
                     dlg,
@@ -2570,18 +2801,14 @@ class FlowSomAnalyzerPro(QMainWindow):
                     "Aucun fichier FCS trouvé.\nSélectionnez d'abord les dossiers dans l'onglet Import.",
                 )
                 return
-
             _, _, col_names = self._read_fcs_header_full(fcs_path)
-
             existing_srcs = set()
             for r in range(local_table.rowCount()):
                 item = local_table.item(r, 0)
                 if item:
                     existing_srcs.add(item.text().strip())
-
             new_cols = [c for c in col_names if c and c not in existing_srcs]
             for col in new_cols:
-                # Proposition automatique : retirer suffixes fluorochromes
                 short = re.sub(
                     r"\s+(KO|FITC|PE|APC|BV\d+|Cy\d+|PerCP|EF\d+|BUV\d+|"
                     r"BB\d+|R\d+|AF\d+|V\d+|Pacific[- ]Blue|AlexaFluor\d*"
@@ -2632,7 +2859,10 @@ class FlowSomAnalyzerPro(QMainWindow):
         btn_del.clicked.connect(_del_rows)
         btn_clear.clicked.connect(_clear)
 
-        # Boutons bas
+        tab_widget.addTab(tab_global, "  Homogénéisation (tous fichiers)  ")
+        vbox.addWidget(tab_widget, 1)
+
+        # ── Boutons bas ─────────────────────────────────────────────────
         btn_row_layout = QHBoxLayout()
         btn_cancel = QPushButton("  Annuler")
         btn_cancel.setObjectName("ghostBtn")
@@ -2653,7 +2883,11 @@ class FlowSomAnalyzerPro(QMainWindow):
         vbox.addLayout(btn_row_layout)
 
         def _apply():
-            # Sauvegarder dans self.rename_table (stockage interne)
+            # Sauvegarder l'état courant du tab per-file
+            if _current_per_file[0]:
+                _save_per_file(_current_per_file[0])
+
+            # Sauvegarder règles globales dans self.rename_table
             self.rename_table.setRowCount(0)
             for r in range(local_table.rowCount()):
                 src_item = local_table.item(r, 0)
@@ -2666,8 +2900,11 @@ class FlowSomAnalyzerPro(QMainWindow):
                     self.rename_table.setItem(row, 0, QTableWidgetItem(src))
                     self.rename_table.setItem(row, 1, QTableWidgetItem(dst))
 
+            # Stocker les règles per-file dans l'objet pour usage pipeline
+            self._per_file_rename_rules = _per_file_rules
+
             # Mettre à jour le badge
-            active = sum(
+            active_global = sum(
                 1
                 for r in range(self.rename_table.rowCount())
                 if (self.rename_table.item(r, 0) and self.rename_table.item(r, 0).text().strip())
@@ -2675,9 +2912,12 @@ class FlowSomAnalyzerPro(QMainWindow):
                 and self.rename_table.item(r, 0).text().strip()
                 != self.rename_table.item(r, 1).text().strip()
             )
+            active_per = sum(len(v) for v in _per_file_rules.values())
+            active = active_global + active_per
             if active:
                 self.lbl_rename_summary.setText(
-                    f"Renommage colonnes : {active} règle(s) active(s). "
+                    f"Renommage colonnes : {active_global} règle(s) globale(s), "
+                    f"{active_per} règle(s) par fichier. "
                     f"Cliquez sur «Renommer colonnes» pour modifier."
                 )
                 self.lbl_rename_summary.setObjectName("summaryLabelActive")
@@ -2716,33 +2956,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             (n_events, n_channels, channel_names: List[str])
             En cas d'erreur : ("?", "?", [])
         """
-        # ── Via flowio ───────────────────────────────────────────────
-        try:
-            import flowio
-
-            fcs = flowio.FlowData(str(fcs_path))
-            n_events = int(fcs.event_count)
-            n_ch = int(fcs.channel_count)
-            text = fcs.text  # dict clés en minuscules : "$p1s", "$p1n", …
-
-            # Normalise en minuscules pour recherche insensible à la casse
-            text_lower = {k.lower(): v for k, v in text.items()}
-
-            names: List[str] = []
-            for i in range(1, n_ch + 1):
-                name = ""
-                # Priorité : $PnS (short name = marqueur) puis $PnN (channel name)
-                for key in (f"$p{i}s", f"p{i}s", f"$p{i}n", f"p{i}n"):
-                    val = str(text_lower.get(key, "")).strip()
-                    if val:
-                        name = val
-                        break
-                names.append(name if name else f"Channel_{i}")
-            return n_events, n_ch, names
-        except Exception:
-            pass
-
-        # ── Fallback : parsing binaire manuel du TEXT segment ────────
+        # ── Parsing binaire du TEXT segment (lecture header seul, rapide) ──
         try:
             with open(fcs_path, "rb") as f:
                 raw_hdr = f.read(58)
@@ -2753,18 +2967,18 @@ class FlowSomAnalyzerPro(QMainWindow):
 
             delimiter = text_raw[0] if text_raw else "/"
             parts = text_raw[1:].split(delimiter)
-            # Construit le dict en conservant les deux variantes (casse + $)
             meta_upper: Dict[str, str] = {}
             for i in range(0, len(parts) - 1, 2):
                 k = parts[i].strip().upper()
                 v = parts[i + 1].strip() if i + 1 < len(parts) else ""
                 meta_upper[k] = v
-                # Variante sans "$"
                 if k.startswith("$"):
                     meta_upper[k[1:]] = v
 
-            n_events = int(meta_upper.get("$TOT", meta_upper.get("TOT", "0")))
-            n_par = int(meta_upper.get("$PAR", meta_upper.get("PAR", "0")))
+            n_events_str = meta_upper.get("$TOT", meta_upper.get("TOT", ""))
+            n_events = int(n_events_str) if n_events_str.isdigit() else 0
+            n_par_str = meta_upper.get("$PAR", meta_upper.get("PAR", ""))
+            n_par = int(n_par_str) if n_par_str.isdigit() else 0
 
             names = []
             for i in range(1, n_par + 1):
@@ -2775,7 +2989,30 @@ class FlowSomAnalyzerPro(QMainWindow):
                         name = val
                         break
                 names.append(name if name else f"Channel_{i}")
-            return n_events, n_par, names
+
+            if n_par > 0:
+                return n_events if n_events > 0 else "?", n_par, names
+        except Exception:
+            pass
+
+        # ── Fallback flowio (lit le fichier complet — plus lent) ─────
+        try:
+            import flowio
+
+            fcs = flowio.FlowData(str(fcs_path))
+            n_events = int(fcs.event_count)
+            n_ch = int(fcs.channel_count)
+            text_lower = {k.lower(): v for k, v in fcs.text.items()}
+            names = []
+            for i in range(1, n_ch + 1):
+                name = ""
+                for key in (f"$p{i}s", f"p{i}s", f"$p{i}n", f"p{i}n"):
+                    val = str(text_lower.get(key, "")).strip()
+                    if val:
+                        name = val
+                        break
+                names.append(name if name else f"Channel_{i}")
+            return n_events, n_ch, names
         except Exception:
             return "?", "?", []
 
@@ -2850,9 +3087,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.progress_bar.setValue(0)
         self.log_output.clear()
 
-        self._log(
-            "═══════════════════════════════════════════════"
-        )
+        self._log("═══════════════════════════════════════════════")
         self._log(f"Pipeline FlowSOM Pro — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._log(f"Grille : {self._config.flowsom.xdim}×{self._config.flowsom.ydim}")
         self._log(f"Métaclusters : {self._config.flowsom.n_metaclusters}")
@@ -2860,9 +3095,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._log(f"GPU : {'Oui' if self._config.gpu.enabled else 'Non'}")
         if self._config.batch.enabled:
             self._log("Mode : Batch (traitement par lots)")
-        self._log(
-            "═══════════════════════════════════════════════"
-        )
+        self._log("═══════════════════════════════════════════════")
 
         if self._config.batch.enabled:
             from flowsom_pipeline_pro.gui.workers import BatchWorker
@@ -2907,6 +3140,82 @@ class FlowSomAnalyzerPro(QMainWindow):
                 self.btn_stop.setEnabled(False)
                 self.statusBar().showMessage("Pipeline interrompu")
                 self._sidebar.set_error(3)
+
+    def _auto_load_patho_fcs(self, result: Any) -> None:
+        """Charge automatiquement le FCS pathologique exporté dans le Viewer FCS."""
+        try:
+            patho_fcs = self._resolve_patho_fcs_path(result)
+            if patho_fcs and Path(patho_fcs).exists():
+                self._patho_fcs_path = patho_fcs
+                if hasattr(self, "btn_reload_patho_fcs"):
+                    self.btn_reload_patho_fcs.setEnabled(True)
+                    self.btn_reload_patho_fcs.setToolTip(f"Recharger : {Path(patho_fcs).name}")
+                self._log(f"[Viewer FCS] Chargement automatique : {Path(patho_fcs).name}")
+                self._load_fcs_for_visualization(file_path=patho_fcs)
+        except Exception as e:
+            self._log(f"[Viewer FCS] Auto-chargement ignoré : {e}")
+
+    def _resolve_patho_fcs_path(self, result: Any = None) -> str:
+        """Résout le chemin du FCS pathologique MRD avec fallback robuste."""
+        source_result = result if result is not None else self._result
+        output_files = getattr(source_result, "output_files", {}) or {}
+
+        # 1) Chemin explicite exporté par le pipeline.
+        patho_fcs = output_files.get("fcs_patho_mrd", "")
+        if patho_fcs and Path(patho_fcs).exists():
+            return str(patho_fcs)
+
+        # 2) Dernier chemin déjà détecté par le viewer.
+        if getattr(self, "_patho_fcs_path", None) and Path(self._patho_fcs_path).exists():
+            return str(self._patho_fcs_path)
+
+        # 3) Fallback scan output/fcs/patho_mrd_*.fcs
+        out_dir = getattr(self.drop_output, "path", "") or ""
+        if out_dir:
+            fcs_dir = Path(out_dir) / "fcs"
+            candidates = sorted(fcs_dir.glob("patho_mrd_*.fcs"), reverse=True)
+            if candidates:
+                return str(candidates[0])
+
+        return ""
+
+    def _resolve_full_fcs_path(self, result: Any = None) -> str:
+        """Résout le chemin du FCS complet exporté par le pipeline."""
+        source_result = result if result is not None else self._result
+        output_files = getattr(source_result, "output_files", {}) or {}
+        full_fcs = output_files.get("fcs_kaluza") or output_files.get("fcs") or ""
+        if full_fcs and Path(full_fcs).exists():
+            return str(full_fcs)
+        return ""
+
+    def _reload_patho_fcs(self) -> None:
+        """Recharge le FCS de sortie patho auto-détecté après pipeline."""
+        if self._patho_fcs_path and Path(self._patho_fcs_path).exists():
+            self._load_fcs_for_visualization(file_path=self._patho_fcs_path)
+        else:
+            QMessageBox.information(
+                self, "Viewer FCS", "Aucun FCS de sortie disponible.\nLancez d'abord le pipeline."
+            )
+
+    def _show_pending_prescreening(self) -> None:
+        """Affiche le popup pré-screening différé, après que HomeTab soit rendu."""
+        ps = getattr(self, "_pending_prescreening", None)
+        if ps is None:
+            return
+        self._pending_prescreening = None
+        from PyQt5.QtCore import QTimer
+
+        def _show():
+            msg = QMessageBox(self)
+            msg.setWindowTitle(ps["title"])
+            msg.setIcon(ps["icon"])
+            msg.setText(ps["text"])
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.setTextFormat(Qt.RichText)
+            msg.setWindowModality(Qt.NonModal)
+            msg.show()
+
+        QTimer.singleShot(400, _show)
 
     # ── Slots worker ───────────────────────────────────────────────────
 
@@ -3007,22 +3316,23 @@ class FlowSomAnalyzerPro(QMainWindow):
                 "→ Rapport CD34+/CD45dim élevé — attention pour l'interprétation de la MRD</b>"
             )
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle(title)
-        msg.setIcon(icon)
-        msg.setText("".join(lines))
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.setTextFormat(Qt.RichText)
-        # Modal pour s'assurer que l'utilisateur le voit
-        msg.setWindowModality(Qt.ApplicationModal)
-        msg.exec_()
+        # Stocker pour affichage différé (après chargement HomeTab)
+        self._pending_prescreening = {
+            "title": title,
+            "icon": icon,
+            "text": "".join(lines),
+            "log": (
+                f"[PRESCREENING] CD34+/CD45dim={ratio_pct:.1f}% "
+                f"(GMM={gmm_pct:.1f}%, KDE={kde_pct:.1f}%) "
+                f"— alerte={alert_level}" + (" — LAIP recommandé" if laip else "")
+            ),
+        }
 
-        # Log dans le panneau
+        # Log immédiat dans le panneau
         self._log(
             f"[PRESCREENING] CD34+/CD45dim={ratio_pct:.1f}% "
             f"(GMM={gmm_pct:.1f}%, KDE={kde_pct:.1f}%) "
-            f"— alerte={alert_level}"
-            + (" — LAIP recommandé" if laip else "")
+            f"— alerte={alert_level}" + (" — LAIP recommandé" if laip else "")
         )
 
     def _on_pipeline_finished(self, result: Any) -> None:
@@ -3054,16 +3364,30 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._load_output_plots(result)
             method_used = self.combo_mrd_method.currentText()
             self._home_tab.load_result(result, method_used)
+            # Afficher/masquer la barre ELN selon l'état du checkbox
+            eln_active = self.chk_blast_filter.isChecked()
+            self._home_tab.show_eln_html_bar(eln_active)
             # Connecter le signal de curation experte → patch HTML temps réel
             try:
                 self._home_tab.curation_changed.disconnect()
             except Exception:
                 pass
             self._home_tab.curation_changed.connect(self._on_curation_changed)
+            try:
+                self._home_tab.verification_commit_requested.disconnect()
+            except Exception:
+                pass
+            self._home_tab.verification_commit_requested.connect(
+                self._on_verification_commit_requested
+            )
             # Aller automatiquement aux résultats
             self._navigate_to_step(4)
             self._sidebar.set_done(4)
             self.tabs.setCurrentIndex(0)
+            # Charger automatiquement le FCS patho dans le Viewer FCS
+            self._auto_load_patho_fcs(result)
+            # Afficher le popup pré-screening APRÈS le chargement de HomeTab
+            self._show_pending_prescreening()
         else:
             self._sidebar.set_error(3)
             self.statusBar().showMessage(" Pipeline terminé avec des erreurs")
@@ -3137,9 +3461,141 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _populate_results(self, result: Any) -> None:
         try:
-            self.txt_summary.setPlainText(result.summary())
-        except Exception:
-            self.txt_summary.setPlainText(f"Cellules : {result.n_cells:,}")
+            import platform
+            import psutil
+
+            lines = []
+
+            # ── En-tête pipeline ──
+            lines.append("═" * 64)
+            lines.append("  RÉSUMÉ PIPELINE — FlowSOM MRD Analyzer Pro")
+            lines.append("═" * 64)
+
+            ts = getattr(result, "timestamp", "")
+            if ts:
+                lines.append(f"  Timestamp     : {ts}")
+
+            elapsed = getattr(result, "elapsed_seconds", 0.0)
+            if elapsed:
+                m, s = divmod(int(elapsed), 60)
+                lines.append(f"  Durée run     : {m}m {s:02d}s ({elapsed:.1f}s)")
+
+            # ── Comptages cellulaires ──
+            lines.append("")
+            lines.append("  CELLULES")
+            lines.append("  " + "─" * 40)
+            n_cells = getattr(result, "n_cells", 0)
+            lines.append(f"  Total analysées          : {n_cells:,}")
+
+            df = getattr(result, "data", None)
+            if df is not None and "condition" in df.columns:
+                import numpy as np
+
+                mask_patho = (
+                    df["condition"].str.lower().str.contains("patho|pathologique", na=False)
+                )
+                n_patho = int(mask_patho.sum())
+                n_sain = int((~mask_patho).sum())
+                pct_patho = n_patho / n_cells * 100 if n_cells > 0 else 0
+                pct_sain = n_sain / n_cells * 100 if n_cells > 0 else 0
+                lines.append(f"  Cellules pathologiques   : {n_patho:,}  ({pct_patho:.1f}%)")
+                lines.append(f"  Cellules saines (NBM)    : {n_sain:,}  ({pct_sain:.1f}%)")
+
+                # x3 : par fichier si file_origin présent
+                if "file_origin" in df.columns:
+                    lines.append("")
+                    lines.append("  Détail par fichier :")
+                    for fname, grp in df.groupby("file_origin"):
+                        m_p = (
+                            grp["condition"]
+                            .str.lower()
+                            .str.contains("patho|pathologique", na=False)
+                        )
+                        np_ = int(m_p.sum())
+                        ns_ = int((~m_p).sum())
+                        lines.append(f"    {str(fname)[:40]:40s}  patho={np_:,}  sain={ns_:,}")
+
+            # ── MRD ──
+            mrd = getattr(result, "mrd_result", None)
+            if mrd is not None:
+                lines.append("")
+                lines.append("  MRD")
+                lines.append("  " + "─" * 40)
+                for attr in ("mrd_percent_jf", "mrd_percent_flo", "mrd_percent_eln"):
+                    val = getattr(mrd, attr, None)
+                    method = attr.replace("mrd_percent_", "").upper()
+                    if val is not None:
+                        lines.append(f"  MRD {method:5s}               : {val:.4f}%")
+
+            # ── Métaclusters ──
+            n_mc = getattr(result, "n_metaclusters", None)
+            if n_mc:
+                lines.append("")
+                lines.append(f"  Métaclusters             : {n_mc}")
+
+            # ── CPU / RAM ──
+            lines.append("")
+            lines.append("  RESSOURCES SYSTÈME")
+            lines.append("  " + "─" * 40)
+            try:
+                cpu_pct = psutil.cpu_percent(interval=0)
+                ram = psutil.virtual_memory()
+                lines.append(f"  CPU utilisation          : {cpu_pct:.1f}%")
+                lines.append(
+                    f"  RAM utilisée             : {ram.used / 1e9:.1f} Go / {ram.total / 1e9:.1f} Go"
+                )
+                lines.append(f"  Plateforme               : {platform.processor()[:60]}")
+            except Exception:
+                pass
+
+            # ── GPU si disponible ──
+            try:
+                import subprocess
+
+                gpu_out = (
+                    subprocess.check_output(
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        timeout=3,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    .decode(errors="ignore")
+                    .strip()
+                )
+                if gpu_out:
+                    lines.append("")
+                    lines.append("  GPU (NVIDIA)")
+                    for gpu_line in gpu_out.split("\n"):
+                        parts = [p.strip() for p in gpu_line.split(",")]
+                        if len(parts) >= 4:
+                            name, mem_used, mem_total, util = parts[:4]
+                            lines.append(
+                                f"  {name[:36]:36s}  {mem_used} / {mem_total} Mo  util={util}%"
+                            )
+            except Exception:
+                pass
+
+            # ── Avertissements ──
+            warns = getattr(result, "warnings", [])
+            if warns:
+                lines.append("")
+                lines.append("  AVERTISSEMENTS")
+                lines.append("  " + "─" * 40)
+                for w in warns[:10]:
+                    lines.append(f"  ⚠ {str(w)[:80]}")
+
+            lines.append("")
+            lines.append("═" * 64)
+            self.txt_summary.setPlainText("\n".join(lines))
+            self.txt_summary.setMaximumHeight(16777215)  # libère la hauteur
+        except Exception as exc:
+            try:
+                self.txt_summary.setPlainText(result.summary())
+            except Exception:
+                self.txt_summary.setPlainText(f"Cellules : {result.n_cells:,}")
 
         try:
             import pandas as pd
@@ -3648,8 +4104,8 @@ class FlowSomAnalyzerPro(QMainWindow):
         if node_table is None:
             return
 
-        # Aucune carte dans la grille = pas d'analyse MRD, on n'écrase rien
-        if not node_table._cards:
+        # Aucun nœud chargé = pas d'analyse MRD, on n'écrase rien
+        if not getattr(node_table, "_nodes", None):
             return
 
         curated_nodes = node_table.get_human_curated_results()
@@ -3673,31 +4129,62 @@ class FlowSomAnalyzerPro(QMainWindow):
             QMessageBox.information(self, "Info", "Aucun résultat à exporter.")
             return
         output_files = self._result.output_files or {}
-        fcs_path = output_files.get("fcs_kaluza") or output_files.get("fcs")
-        if fcs_path and Path(fcs_path).exists():
-            QMessageBox.information(
-                self, "Export FCS", f"Fichier FCS exporté par le pipeline :\n{fcs_path}"
+        source_fcs = (
+            output_files.get("fcs_kaluza")
+            or output_files.get("fcs")
+            or self._resolve_patho_fcs_path(self._result)
+        )
+        if not source_fcs or not Path(source_fcs).exists():
+            QMessageBox.warning(
+                self,
+                "Export FCS",
+                "Aucun fichier FCS source disponible.\n"
+                "Vérifie les options d'export FCS puis relance le pipeline.",
             )
-        else:
-            try:
-                path, _ = QFileDialog.getSaveFileName(self, "Exporter FCS", "", "FCS Files (*.fcs)")
-                if path:
-                    self._result.data.to_csv(path.replace(".fcs", ".csv"), index=False)
-                    self._log(f" Données exportées en CSV : {path.replace('.fcs', '.csv')}")
-            except Exception as e:
-                QMessageBox.critical(self, "Erreur", str(e))
+            self._log("[Export FCS] Annulé : aucun FCS source trouvé.")
+            return
+
+        # IMPORTANT: le FCS source exporté doit refléter la curation manuelle.
+        if not self._patch_is_mrd_in_fcs_file(source_fcs, log_prefix="[FCS export]"):
+            QMessageBox.warning(
+                self,
+                "Export FCS",
+                "Échec de mise à jour de Is_MRD selon la validation manuelle.\n"
+                "Export annulé pour éviter un FCS incohérent.\n"
+                "Consulte les logs [FCS export] pour le détail.",
+            )
+            return
+
+        try:
+            default_name = Path(source_fcs).name
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Exporter FCS",
+                str(Path(self.drop_output.path or "") / default_name),
+                "FCS Files (*.fcs)",
+            )
+            if not path:
+                return
+            target = Path(path)
+            if target.suffix.lower() != ".fcs":
+                target = target.with_suffix(".fcs")
+            shutil.copy2(source_fcs, target)
+            self._log(f"[Export FCS] FCS exporté : {target}")
+            QMessageBox.information(self, "Export FCS", f"FCS exporté :\n{target}")
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", str(e))
 
     def _export_csv(self) -> None:
         self._inject_human_curation()
+        # Réécriture Is_MRD demandée explicitement uniquement à l'export.
+        self._patch_is_mrd_in_patho_fcs()
         if self._result is None or not self._result.success:
             QMessageBox.information(self, "Info", "Aucun résultat à exporter.")
             return
         output_files = self._result.output_files or {}
         csv_path = output_files.get("cells_csv") or output_files.get("csv")
         if csv_path and Path(csv_path).exists():
-            QMessageBox.information(
-                self, "Export CSV", f"Fichier CSV déjà exporté :\n{csv_path}"
-            )
+            QMessageBox.information(self, "Export CSV", f"Fichier CSV déjà exporté :\n{csv_path}")
         else:
             try:
                 path, _ = QFileDialog.getSaveFileName(self, "Exporter CSV", "", "CSV Files (*.csv)")
@@ -3767,6 +4254,343 @@ class FlowSomAnalyzerPro(QMainWindow):
                 self._log(" HTML mis à jour (validation experte).")
         except Exception as _e:
             _logger.warning("_on_curation_changed patch HTML: %s", _e)
+
+        # IMPORTANT perf UI : ne pas réécrire le FCS ici.
+        # Cette opération disque coûteuse est déclenchée uniquement via les actions d'export.
+
+    def _on_verification_commit_requested(self, filter_label: str) -> None:
+        """
+        Validation explicite depuis le bouton UI : applique immédiatement
+        la curation au HTML et au FCS pathologique Is_MRD.
+        """
+        self._log(f"[Validation experte] Demande explicite reçue (filtre: {filter_label}).")
+        self._inject_human_curation()
+        self._on_curation_changed()  # patch HTML
+        patho_ok = self._patch_is_mrd_in_patho_fcs()
+        full_fcs = self._resolve_full_fcs_path(self._result)
+        full_ok = False
+        if full_fcs and Path(full_fcs).exists():
+            patho_fcs = self._resolve_patho_fcs_path(self._result)
+            if not patho_fcs or Path(full_fcs).resolve() != Path(patho_fcs).resolve():
+                full_ok = self._patch_is_mrd_in_fcs_file(full_fcs, log_prefix="[FCS complet]")
+        fcs_ok = patho_ok or full_ok
+
+        method_label = (
+            self.combo_mrd_fcs_method.currentText()
+            if hasattr(self, "combo_mrd_fcs_method")
+            else "flo"
+        )
+        if hasattr(self, "_home_tab") and self._home_tab is not None:
+            try:
+                self._home_tab.set_validation_status(method_label, filter_label)
+            except Exception:
+                pass
+        if fcs_ok:
+            # Recharger explicitement le FCS patho patché dans le viewer et forcer la coloration MRD.
+            try:
+                _patched_path = self._resolve_patho_fcs_path(self._result)
+                if _patched_path and Path(_patched_path).exists():
+                    self._load_fcs_for_visualization(file_path=_patched_path)
+                    self._set_fcs_viewer_color_to_mrd()
+            except Exception as _viewer_e:
+                self._log(f"[Viewer FCS] Synchronisation post-validation ignorée : {_viewer_e}")
+            self._log(
+                " Validation explicite appliquée — HTML + FCS mis à jour "
+                f"(méthode FCS: {method_label.upper()}, filtre: {filter_label})."
+            )
+            QMessageBox.information(
+                self,
+                "Validation experte",
+                "Validation appliquée avec succès.\n"
+                "Le HTML et le FCS pathologique ont été mis à jour.",
+            )
+        else:
+            self._log(
+                "[Validation experte] HTML mis à jour mais FCS non réécrit; voir logs [FCS patho]."
+            )
+            QMessageBox.warning(
+                self,
+                "Validation experte",
+                "Validation appliquée, mais la réécriture FCS a échoué/été ignorée.\n"
+                "Consulte les logs [FCS patho] et [FCS complet] pour le détail.",
+            )
+
+    def _set_fcs_viewer_color_to_mrd(self) -> None:
+        """Force la coloration du viewer sur la colonne MRD si disponible."""
+        try:
+            candidates = (
+                "is_mrd",
+                "ismrd",
+                "is_mrd_flo",
+                "is_mrd_jf",
+                "mrd+/mrd",
+            )
+            target_idx = -1
+            for i in range(self.combo_fcs_color.count()):
+                txt = (self.combo_fcs_color.itemText(i) or "").lower().replace(" ", "_")
+                data = self.combo_fcs_color.itemData(i)
+                data_col = ""
+                if isinstance(data, tuple) and data:
+                    data_col = str(data[0]).lower().replace(" ", "_")
+                if any(c in txt for c in candidates) or any(c in data_col for c in candidates):
+                    target_idx = i
+                    break
+            if target_idx >= 0:
+                self.combo_fcs_color.setCurrentIndex(target_idx)
+                self._update_fcs_plot()
+                self._log("[Viewer FCS] Coloration synchronisée sur MRD.")
+        except Exception as _e:
+            self._log(f"[Viewer FCS] Impossible de forcer la coloration MRD : {_e}")
+
+    def _patch_is_mrd_in_patho_fcs(self) -> bool:
+        """Met à jour la/les colonne(s) Is_MRD du FCS patho selon curated_nodes."""
+        if self._result is None:
+            self._log("[FCS patho] Patch Is_MRD ignoré : aucun résultat pipeline en mémoire.")
+            return False
+        patho_fcs = self._resolve_patho_fcs_path(self._result)
+        if not patho_fcs or not Path(patho_fcs).exists():
+            self._log(
+                "[FCS patho] Patch Is_MRD ignoré : fichier pathologique introuvable "
+                "(fcs_patho_mrd et fallback viewer/output)."
+            )
+            self._log("[FCS patho] Vérifie patho_fcs_export.enabled=true puis relance le pipeline.")
+            return False
+        return self._patch_is_mrd_in_fcs_file(patho_fcs, log_prefix="[FCS patho]")
+
+    def _patch_is_mrd_in_fcs_file(self, fcs_path: str, log_prefix: str = "[FCS]") -> bool:
+        """Applique la curation manuelle au champ Is_MRD d'un fichier FCS donné."""
+        curated_nodes = getattr(self._result, "curated_nodes", None)
+        if curated_nodes is None:
+            self._log(
+                f"{log_prefix} Patch Is_MRD ignoré : aucune curation détectée (curated_nodes=None)."
+            )
+            return False
+        try:
+            import numpy as np
+
+            # Ensemble des node_id curatés comme MRD (0-based côté MRD/per_node)
+            mrd_node_ids: set = set()
+            curated_cells_expected = 0
+            for nd in curated_nodes:
+                nid = nd.get("node_id") if isinstance(nd, dict) else getattr(nd, "node_id", None)
+                n_patho = (
+                    nd.get("n_patho", 0) if isinstance(nd, dict) else getattr(nd, "n_patho", 0)
+                )
+                if nid is not None:
+                    mrd_node_ids.add(int(nid))
+                try:
+                    curated_cells_expected += int(n_patho)
+                except Exception:
+                    pass
+
+            self._log(f"{log_prefix} Fichier cible patch Is_MRD : {fcs_path}")
+            events = None
+            col_names: List[str] = []
+
+            # 1) Lecture flowio (prioritaire)
+            try:
+                import flowio
+
+                fcs_data = flowio.FlowData(fcs_path)
+                events = np.reshape(fcs_data.events, (-1, fcs_data.channel_count)).copy()
+                n_ch = fcs_data.channel_count
+                text = {k.lower(): v for k, v in fcs_data.text.items()}
+                for i in range(1, n_ch + 1):
+                    for key in (f"$p{i}s", f"p{i}s", f"$p{i}n", f"p{i}n"):
+                        if key in text:
+                            col_names.append(str(text[key]))
+                            break
+                    else:
+                        col_names.append(f"Channel_{i}")
+            except Exception as _e_flowio:
+                self._log(f"{log_prefix} lecture flowio indisponible: {str(_e_flowio)[:120]}")
+
+            # 2) Fallback fcsparser
+            if events is None:
+                try:
+                    import fcsparser
+
+                    for naming in ("$PnS", "$PnN"):
+                        try:
+                            _, data = fcsparser.parse(
+                                fcs_path,
+                                meta_data_only=False,
+                                reformat_meta=False,
+                                channel_naming=naming,
+                            )
+                            events = data.values.astype(np.float32)
+                            col_names = [str(c) for c in data.columns]
+                            break
+                        except Exception:
+                            continue
+                except Exception as _e_fcsparser:
+                    self._log(
+                        f"{log_prefix} lecture fcsparser indisponible: {str(_e_fcsparser)[:120]}"
+                    )
+
+            # 3) Fallback lecteur binaire interne
+            if events is None:
+                try:
+                    adata = self._read_fcs_binary(fcs_path)
+                    X = adata.X
+                    if hasattr(X, "toarray"):
+                        X = X.toarray()
+                    events = np.asarray(X, dtype=np.float32)
+                    col_names = [str(c) for c in list(adata.var_names)]
+                except Exception as _e_bin:
+                    self._log(f"{log_prefix} lecture binaire indisponible: {str(_e_bin)[:120]}")
+
+            if events is None or len(col_names) == 0:
+                self._log(f"{log_prefix} Impossible de lire le FCS pour patch Is_MRD.")
+                return False
+
+            col_lower = [str(c).lower().strip() for c in col_names]
+            col_norm = [c.replace(" ", "_").replace("-", "_") for c in col_lower]
+
+            # Cluster: priorité à FlowSOM_cluster puis fallback cluster non-meta.
+            cluster_idx = None
+            if "flowsom_cluster" in col_norm:
+                cluster_idx = col_norm.index("flowsom_cluster")
+            else:
+                for i, c in enumerate(col_norm):
+                    if c.startswith("flowsom_cluster"):
+                        cluster_idx = i
+                        break
+            if cluster_idx is None and "cluster" in col_norm:
+                cluster_idx = col_norm.index("cluster")
+            if cluster_idx is None:
+                for i, c in enumerate(col_norm):
+                    if c.endswith("cluster") and "meta" not in c:
+                        cluster_idx = i
+                        break
+            if cluster_idx is None:
+                self._log(f"{log_prefix} Colonne FlowSOM_cluster introuvable; patch Is_MRD ignoré.")
+                return False
+
+            # Réécrire Is_MRD en fonction des nœuds curatés.
+            # IMPORTANT: la curation manuelle devient la vérité terrain finale.
+            # Le codage des clusters peut être 0-based ou 1-based selon l'export.
+            clusters_raw = np.rint(events[:, cluster_idx]).astype(np.int32)
+            mask_0b = np.array([int(c) in mrd_node_ids for c in clusters_raw], dtype=bool)
+            clusters_1b = np.clip(clusters_raw - 1, 0, None)
+            mask_1b = np.array([int(c) in mrd_node_ids for c in clusters_1b], dtype=bool)
+
+            n0 = int(mask_0b.sum())
+            n1 = int(mask_1b.sum())
+            if curated_cells_expected > 0:
+                use_1b = abs(n1 - curated_cells_expected) < abs(n0 - curated_cells_expected)
+            else:
+                use_1b = n1 > n0
+            is_mrd_new = (mask_1b if use_1b else mask_0b).astype(np.float32)
+            self._log(
+                f"{log_prefix} Mapping cluster retenu: {'1-based→0-based' if use_1b else '0-based direct'} "
+                f"(MRD={int(is_mrd_new.sum()):,}, attendu={curated_cells_expected:,})"
+            )
+
+            # Met à jour toutes les variantes Is_MRD existantes (Is_MRD, Is_MRD_FLO, Is_MRD_JF...).
+            mrd_indices = [
+                i
+                for i, c in enumerate(col_norm)
+                if c == "is_mrd" or c == "ismrd" or c.startswith("is_mrd") or c.startswith("ismrd")
+            ]
+            patched_cols: List[str] = []
+            for idx in mrd_indices:
+                events[:, idx] = is_mrd_new
+                patched_cols.append(col_names[idx])
+
+            # Si aucune colonne MRD n'existe, on ajoute une colonne canonique Is_MRD.
+            if not mrd_indices:
+                events = np.column_stack([events, is_mrd_new.astype(np.float32)])
+                col_names.append("Is_MRD")
+                patched_cols.append("Is_MRD")
+
+            # FCS ne supporte pas NaN/Inf.
+            events = np.nan_to_num(events, nan=0.0, posinf=1e6, neginf=0.0).astype(np.float32)
+
+            # Réécriture atomique via fichier temporaire.
+            try:
+                import fcswrite
+
+                target_path = Path(fcs_path)
+                tmp_path = str(target_path.with_name(target_path.stem + ".tmp_patch.fcs"))
+
+                fcswrite.write_fcs(
+                    filename=tmp_path,
+                    chn_names=col_names,
+                    data=events,
+                    compat_chn_names=True,
+                    compat_percent=False,
+                    endianness="big",
+                )
+                os.replace(tmp_path, fcs_path)
+            except ImportError:
+                self._log(f"{log_prefix} fcswrite non installé : tentative via export_to_fcs.")
+                try:
+                    import pandas as pd
+                    from flowsom_pipeline_pro.src.io.fcs_writer import export_to_fcs
+
+                    target_path = Path(fcs_path)
+                    tmp_path = str(target_path.with_name(target_path.stem + ".tmp_patch.fcs"))
+                    df_tmp = pd.DataFrame(events, columns=col_names)
+                    ok = export_to_fcs(df_tmp, tmp_path, compat_chn_names=True)
+                    if not ok or not Path(tmp_path).exists():
+                        self._log(f"{log_prefix} fallback export_to_fcs a échoué.")
+                        return False
+                    os.replace(tmp_path, fcs_path)
+                except Exception as _fallback_e:
+                    self._log(f"{log_prefix} fallback export_to_fcs impossible : {_fallback_e}")
+                    return False
+            except Exception as _write_e:
+                self._log(f"{log_prefix} écriture fcswrite échouée : {_write_e}")
+                try:
+                    import pandas as pd
+                    from flowsom_pipeline_pro.src.io.fcs_writer import export_to_fcs
+
+                    target_path = Path(fcs_path)
+                    tmp_path = str(target_path.with_name(target_path.stem + ".tmp_patch.fcs"))
+                    df_tmp = pd.DataFrame(events, columns=col_names)
+                    ok = export_to_fcs(df_tmp, tmp_path, compat_chn_names=True)
+                    if not ok or not Path(tmp_path).exists():
+                        self._log(
+                            f"{log_prefix} fallback export_to_fcs a échoué après erreur fcswrite."
+                        )
+                        return False
+                    os.replace(tmp_path, fcs_path)
+                except Exception as _fallback_e2:
+                    self._log(f"{log_prefix} fallback export_to_fcs impossible : {_fallback_e2}")
+                    return False
+
+            n_mrd = int((is_mrd_new > 0).sum())
+            self._log(
+                f" {log_prefix} Is_MRD manuel appliqué : {n_mrd:,} cellules MRD / {len(events):,}"
+            )
+            self._log(f" {log_prefix} Colonnes MRD écrasées: {', '.join(patched_cols)}")
+            self._log(
+                f" {log_prefix} [AUDIT MRD EXPORT] "
+                "Nœuds curés=%d | Cellules attendues=%d | Cellules Is_MRD exportées=%d"
+                % (len(mrd_node_ids), curated_cells_expected, n_mrd)
+            )
+            if curated_cells_expected != n_mrd:
+                self._log(
+                    f" {log_prefix} [AUDIT MRD EXPORT][ATTENTION] "
+                    "Écart attendu/exporté = %d cellule(s)." % (n_mrd - curated_cells_expected)
+                )
+
+            # Recharger le viewer FCS si c'est ce fichier qui est affiché
+            info_text = self.lbl_fcs_info.text()
+            if Path(fcs_path).name in info_text:
+                self._load_fcs_for_visualization(file_path=fcs_path)
+                self._set_fcs_viewer_color_to_mrd()
+
+            return True
+
+        except Exception as _e:
+            self._log(f"{log_prefix}[ERREUR] Patch Is_MRD échoué : {_e}")
+            try:
+                _logger.warning("_patch_is_mrd_in_fcs_file: %s", _e)
+            except Exception:
+                pass
+            return False
 
     def _open_html_report(self) -> None:
         self._inject_human_curation()
@@ -3954,12 +4778,21 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._log(f"Lecture binaire FCS : {len(events)} events, {n_params} canaux")
         return adata
 
-    def _load_fcs_for_visualization(self) -> None:
+    def _load_fcs_for_visualization(self, file_path: Optional[str] = None) -> None:
         import numpy as np
 
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Charger un fichier FCS", "", "FCS Files (*.fcs *.FCS)"
-        )
+        if file_path is None:
+            dlg = QFileDialog(self, "Charger un fichier FCS")
+            dlg.setFileMode(QFileDialog.ExistingFile)
+            dlg.setNameFilter("FCS Files (*.fcs *.FCS);;All Files (*)")
+            dlg.setWindowModality(Qt.ApplicationModal)
+            dlg.raise_()
+            dlg.activateWindow()
+            if dlg.exec_() == QFileDialog.Accepted:
+                selected = dlg.selectedFiles()
+                file_path = selected[0] if selected else ""
+            else:
+                file_path = ""
         if not file_path:
             return
         try:
@@ -4058,6 +4891,8 @@ class FlowSomAnalyzerPro(QMainWindow):
             self.combo_fcs_color.blockSignals(True)
             self.combo_fcs_color.clear()
             self.combo_fcs_color.addItem("Aucune")
+
+            # Colonnes classiques FlowSOM
             color_patterns = (
                 "flowsom_cluster",
                 "flowsom_metacluster",
@@ -4066,9 +4901,79 @@ class FlowSomAnalyzerPro(QMainWindow):
                 "metacluster",
                 "flowsom",
             )
+            # Colonnes d'annotation spéciales — traitement prioritaire avec palettes dédiées
+            # Inclut les variantes avec underscore ET avec espace (fcswrite compat_chn_names=True
+            # remplace _ par espace : "Is_MRD" → "Is MRD", "CD45_Status" → "CD45 Status", etc.)
+            # Format clé: nom normalisé (lowercase, underscores) → (label_display, clé_palette)
+            _SPECIAL_COLS = {
+                # Is_MRD — variantes fcswrite
+                "is_mrd": ("Is_MRD", "__palette_is_mrd__"),
+                "ismrd": ("Is_MRD", "__palette_is_mrd__"),
+                "is mrd": ("Is_MRD", "__palette_is_mrd__"),
+                "is_mrd_flo": ("Is_MRD", "__palette_is_mrd__"),
+                "is_mrd_jf": ("Is_MRD", "__palette_is_mrd__"),
+                "is mrd flo": ("Is_MRD", "__palette_is_mrd__"),
+                "is mrd jf": ("Is_MRD", "__palette_is_mrd__"),
+                # CD45_Status — CD45+ / CD45dim / CD45-
+                "cd45_status": ("CD45_Status", "__palette_cd45__"),
+                "cd45 status": ("CD45_Status", "__palette_cd45__"),
+                "cd45status": ("CD45_Status", "__palette_cd45__"),
+                # CD34_Status — CD34+ / CD34-
+                "cd34_status": ("CD34_Status", "__palette_cd34__"),
+                "cd34 status": ("CD34_Status", "__palette_cd34__"),
+                "cd34status": ("CD34_Status", "__palette_cd34__"),
+                # Debris_Flag — Débris oui/non
+                "debris_flag": ("Debris_Flag", "__palette_debris__"),
+                "debris flag": ("Debris_Flag", "__palette_debris__"),
+                "debrisflag": ("Debris_Flag", "__palette_debris__"),
+                # Doublet_Flag — Doublets oui/non
+                "doublet_flag": ("Doublet_Flag", "__palette_doublet__"),
+                "doublet flag": ("Doublet_Flag", "__palette_doublet__"),
+                "doubletflag": ("Doublet_Flag", "__palette_doublet__"),
+            }
+            # Labels d'affichage explicites dans le combo
+            _SPECIAL_DISPLAY = {
+                "Is_MRD": "MRD+/MRD−  (Is_MRD)",
+                "CD45_Status": "CD45+ / CD45dim / CD45−",
+                "CD34_Status": "CD34+ / CD34−",
+                "Debris_Flag": "Débris oui/non",
+                "Doublet_Flag": "Doublets oui/non",
+            }
+            _special_found: dict = {}  # label_interne → (col_name_réelle, palette_key)
+
             for m in markers:
+                # Normaliser : lowercase + remplacer espaces par underscores pour lookup
+                ml = m.lower().replace(" ", "_")
+                if ml in _SPECIAL_COLS:
+                    label, palette_key = _SPECIAL_COLS[ml]
+                    _special_found[label] = (m, palette_key)
+                    continue
                 if any(p in m.lower() for p in color_patterns):
                     self.combo_fcs_color.addItem(m)
+
+            # Ajouter les colonnes spéciales avec leur palette encodée dans userData
+            _auto_select_col: Optional[int] = None
+            for label, (col_name, palette_key) in _special_found.items():
+                display = _SPECIAL_DISPLAY.get(label, label)
+                self.combo_fcs_color.addItem(display, (col_name, palette_key))
+                if label == "Is_MRD":
+                    _auto_select_col = self.combo_fcs_color.count() - 1
+
+            # Sélection automatique Is_MRD si présent, sinon CD45_Status
+            if _auto_select_col is not None:
+                self.combo_fcs_color.setCurrentIndex(_auto_select_col)
+            elif "CD45_Status" in _special_found:
+                idx = next(
+                    (
+                        i
+                        for i in range(self.combo_fcs_color.count())
+                        if "CD45" in (self.combo_fcs_color.itemText(i) or "")
+                    ),
+                    -1,
+                )
+                if idx >= 0:
+                    self.combo_fcs_color.setCurrentIndex(idx)
+
             self.combo_fcs_color.blockSignals(False)
 
             fsc_idx = next((i for i, m in enumerate(markers) if "FSC" in m.upper()), 0)
@@ -4100,7 +5005,13 @@ class FlowSomAnalyzerPro(QMainWindow):
             x_marker = self.combo_fcs_x.currentText()
             y_marker = self.combo_fcs_y.currentText()
             plot_type = self.combo_fcs_plot_type.currentText()
-            color_by = self.combo_fcs_color.currentText()
+            # currentData() = (col_name, palette_key) pour colonnes spéciales, None sinon
+            color_by_data = self.combo_fcs_color.currentData()
+            _palette_key: Optional[str] = None
+            if isinstance(color_by_data, tuple):
+                color_by, _palette_key = color_by_data  # (col_name, "__palette_xxx__")
+            else:
+                color_by = self.combo_fcs_color.currentText()
             show_all = self.chk_fcs_all_cells.isChecked()
             max_cells = float("inf") if show_all else self.spin_fcs_cells.value()
 
@@ -4114,9 +5025,38 @@ class FlowSomAnalyzerPro(QMainWindow):
             x_data = X[:, var_names.index(x_marker)].copy()
             y_data = X[:, var_names.index(y_marker)].copy()
 
+            # Détecter si coloré par Is_MRD pour une colormap dédiée (rétro-compat texte brut)
+            _is_mrd_coloring = _palette_key == "__palette_is_mrd__" or (
+                not _palette_key
+                and isinstance(color_by, str)
+                and color_by.lower().replace(" ", "_") in ("is_mrd", "ismrd")
+            )
             color_data = None
-            if color_by != "Aucune" and color_by in var_names:
-                color_data = X[:, var_names.index(color_by)].copy()
+            # Normalisation robuste : ignore underscore vs espace, casse
+            # (fcswrite compat_chn_names convertit "Is_MRD" → "Is MRD")
+            _var_names_norm = [v.lower().replace(" ", "_").replace("-", "_") for v in var_names]
+            if _palette_key and isinstance(color_by, str):
+                # Colonnes spéciales : chercher par nom normalisé dans var_names
+                _ck = color_by.lower().replace(" ", "_").replace("-", "_")
+                if color_by in var_names:
+                    color_data = X[:, var_names.index(color_by)].copy()
+                elif _ck in _var_names_norm:
+                    color_data = X[:, _var_names_norm.index(_ck)].copy()
+                else:
+                    # Dernier recours : correspondance partielle sur le radical du nom
+                    _radical = _ck.split("_")[0]  # ex: "is", "cd45", "cd34", "debris", "doublet"
+                    for _vi, _vn in enumerate(_var_names_norm):
+                        if _vn.startswith(_radical) and len(_vn) <= len(_ck) + 4:
+                            color_data = X[:, _vi].copy()
+                            break
+            elif color_by != "Aucune" and isinstance(color_by, str):
+                # Colonnes classiques FlowSOM_cluster etc.
+                _color_key = color_by.lower().replace(" ", "_").replace("-", "_")
+                if color_by in var_names:
+                    color_data = X[:, var_names.index(color_by)].copy()
+                elif _color_key in _var_names_norm:
+                    _ci = _var_names_norm.index(_color_key)
+                    color_data = X[:, _ci].copy()
 
             som_grid = {"xgrid", "ygrid"}
             som_nodes = {"xnodes", "ynodes"}
@@ -4186,20 +5126,141 @@ class FlowSomAnalyzerPro(QMainWindow):
             if color_data is not None and plot_type == "Scatter":
                 from matplotlib.patches import Patch
 
-                unique_vals = np.unique(color_data[np.isfinite(color_data)])
-                n_c = len(unique_vals)
-                cmap = plt.cm.tab20 if n_c <= 20 else (plt.cm.tab20b if n_c <= 40 else plt.cm.turbo)
-                indices = np.searchsorted(unique_vals, color_data)
-                scatter_colors = cmap(indices / max(n_c - 1, 1))
-                if n_c <= 20:
+                if _is_mrd_coloring or _palette_key == "__palette_is_mrd__":
+                    # MRD+ rouge néon / Non-MRD bleu transparent
+                    _n = len(color_data)
+                    _c = np.zeros((_n, 4), dtype=float)
+                    _mrd_mask = color_data > 0.5
+                    _c[_mrd_mask] = [1.0, 0.239, 0.431, 0.92]  # #FF3D6E  MRD+
+                    _c[~_mrd_mask] = [0.357, 0.667, 1.0, 0.30]  # #5BAAFF  Non-MRD
+                    scatter_colors = _c
+                    _n_mrd = int(_mrd_mask.sum())
+                    _n_non = _n - _n_mrd
                     legend_handles = [
                         Patch(
-                            facecolor=cmap(i / max(n_c - 1, 1)),
-                            edgecolor="white",
-                            label=f"{color_by.replace('FlowSOM_', '')} {int(v)}",
-                        )
-                        for i, v in enumerate(unique_vals)
+                            facecolor="#5BAAFF",
+                            edgecolor="none",
+                            label=f"Non-MRD  ({_n_non:,} cellules)",
+                        ),
+                        Patch(
+                            facecolor="#FF3D6E",
+                            edgecolor="none",
+                            label=f"MRD positif  ({_n_mrd:,} cellules)",
+                        ),
                     ]
+                elif _palette_key == "__palette_cd45__":
+                    # CD45_Status : 0=N/D  1=CD45+bright  2=CD45dim  3=CD45−
+                    _cd45_map = {
+                        0.0: (0.55, 0.55, 0.65, 0.20),  # N/D — gris discret
+                        1.0: (0.224, 1.0, 0.541, 0.88),  # CD45+ bright — vert #39FF8A
+                        2.0: (1.0, 0.608, 0.239, 0.88),  # CD45dim     — orange #FF9B3D
+                        3.0: (1.0, 0.239, 0.431, 0.88),  # CD45−       — rouge #FF3D6E
+                    }
+                    _c = np.zeros((len(color_data), 4), dtype=float)
+                    _counts_cd45 = {}
+                    for _val, _rgba in _cd45_map.items():
+                        _mask_v = np.abs(color_data - _val) < 0.5
+                        _c[_mask_v] = _rgba
+                        _counts_cd45[_val] = int(_mask_v.sum())
+                    scatter_colors = _c
+                    legend_handles = [
+                        Patch(
+                            facecolor="#39FF8A",
+                            edgecolor="none",
+                            label=f"CD45+  bright  ({_counts_cd45.get(1.0, 0):,})",
+                        ),
+                        Patch(
+                            facecolor="#FF9B3D",
+                            edgecolor="none",
+                            label=f"CD45  dim     ({_counts_cd45.get(2.0, 0):,})",
+                        ),
+                        Patch(
+                            facecolor="#FF3D6E",
+                            edgecolor="none",
+                            label=f"CD45−  négatif ({_counts_cd45.get(3.0, 0):,})",
+                        ),
+                        Patch(
+                            facecolor=(0.55, 0.55, 0.65, 0.5),
+                            edgecolor="none",
+                            label=f"N/D  ({_counts_cd45.get(0.0, 0):,})",
+                        ),
+                    ]
+                elif _palette_key == "__palette_cd34__":
+                    # CD34_Status : 1=CD34+  0=CD34−
+                    _n = len(color_data)
+                    _c = np.zeros((_n, 4), dtype=float)
+                    _cd34_pos = color_data > 0.5
+                    _c[_cd34_pos] = [0.357, 0.667, 1.0, 0.92]  # #5BAAFF  CD34+
+                    _c[~_cd34_pos] = [0.55, 0.55, 0.65, 0.18]  # gris discret CD34−
+                    scatter_colors = _c
+                    _n_pos = int(_cd34_pos.sum())
+                    legend_handles = [
+                        Patch(
+                            facecolor="#5BAAFF",
+                            edgecolor="none",
+                            label=f"CD34+  ({_n_pos:,} cellules)",
+                        ),
+                        Patch(
+                            facecolor=(0.55, 0.55, 0.65, 0.5),
+                            edgecolor="none",
+                            label=f"CD34−  ({_n - _n_pos:,} cellules)",
+                        ),
+                    ]
+                elif _palette_key == "__palette_debris__":
+                    # Debris_Flag : 1=débris  0=cellule valide
+                    _n = len(color_data)
+                    _c = np.zeros((_n, 4), dtype=float)
+                    _debris_mask = color_data > 0.5
+                    _c[_debris_mask] = [1.0, 0.239, 0.431, 0.88]  # #FF3D6E  débris
+                    _c[~_debris_mask] = [0.357, 0.667, 1.0, 0.22]  # #5BAAFF  valide
+                    scatter_colors = _c
+                    _n_deb = int(_debris_mask.sum())
+                    legend_handles = [
+                        Patch(
+                            facecolor="#5BAAFF",
+                            edgecolor="none",
+                            label=f"Cellule valide  ({_n - _n_deb:,})",
+                        ),
+                        Patch(facecolor="#FF3D6E", edgecolor="none", label=f"Débris  ({_n_deb:,})"),
+                    ]
+                elif _palette_key == "__palette_doublet__":
+                    # Doublet_Flag : 1=doublet  0=singlet
+                    _n = len(color_data)
+                    _c = np.zeros((_n, 4), dtype=float)
+                    _doub_mask = color_data > 0.5
+                    _c[_doub_mask] = [1.0, 0.608, 0.239, 0.88]  # #FF9B3D  doublet
+                    _c[~_doub_mask] = [0.357, 0.667, 1.0, 0.22]  # #5BAAFF  singlet
+                    scatter_colors = _c
+                    _n_dbl = int(_doub_mask.sum())
+                    legend_handles = [
+                        Patch(
+                            facecolor="#5BAAFF",
+                            edgecolor="none",
+                            label=f"Singlet  ({_n - _n_dbl:,})",
+                        ),
+                        Patch(
+                            facecolor="#FF9B3D", edgecolor="none", label=f"Doublet  ({_n_dbl:,})"
+                        ),
+                    ]
+                else:
+                    unique_vals = np.unique(color_data[np.isfinite(color_data)])
+                    n_c = len(unique_vals)
+                    cmap = (
+                        plt.cm.tab20
+                        if n_c <= 20
+                        else (plt.cm.tab20b if n_c <= 40 else plt.cm.turbo)
+                    )
+                    indices = np.searchsorted(unique_vals, color_data)
+                    scatter_colors = cmap(indices / max(n_c - 1, 1))
+                    if n_c <= 20:
+                        legend_handles = [
+                            Patch(
+                                facecolor=cmap(i / max(n_c - 1, 1)),
+                                edgecolor="white",
+                                label=f"{color_by.replace('FlowSOM_', '')} {int(v)}",
+                            )
+                            for i, v in enumerate(unique_vals)
+                        ]
 
             if plot_type == "Scatter":
                 ax.scatter(
@@ -4300,6 +5361,7 @@ class FlowSomAnalyzerPro(QMainWindow):
                 # Chemins
                 "healthy_folder": self.drop_healthy.path or "",
                 "patho_folder": self.drop_patho.path or "",
+                "output_folder": self.drop_output.path or "",
                 # SOM
                 "xdim": self.spin_xdim.value(),
                 "ydim": self.spin_ydim.value(),
@@ -4356,6 +5418,10 @@ class FlowSomAnalyzerPro(QMainWindow):
         patho = data.get("patho_folder", "")
         if patho and Path(patho).is_dir():
             self.drop_patho.set_path(patho)
+
+        output = data.get("output_folder", "")
+        if output and Path(output).is_dir():
+            self.drop_output.set_path(output)
 
         # Rafraîchit l'aperçu FCS si au moins un dossier est présent
         if healthy or patho:
@@ -4475,4 +5541,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -13,6 +13,7 @@ Avant analyse : écran d'attente avec état des données chargées.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtWidgets import (
@@ -23,18 +24,11 @@ from PyQt5.QtWidgets import (
     QFrame,
     QScrollArea,
     QSizePolicy,
-    QGridLayout,
     QStackedWidget,
     QPushButton,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt5.QtGui import QFont, QColor
-
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-import matplotlib
-
-matplotlib.use("Qt5Agg")
 
 from flowsom_pipeline_pro.gui.widgets.mrd_gauge import MRDGauge
 from flowsom_pipeline_pro.gui.widgets.mrd_node_table import MRDNodeTable
@@ -54,8 +48,6 @@ _YELLOW = "#FFE032"  # ch-percp / warn
 _LAVENDER = "#7B52FF"  # ch-v450 / brand
 
 # Font used in all matplotlib figures
-_FONT_FAMILY = "Segoe UI"
-_FONT_FALLBACK = ["Segoe UI", "Arial", "Arial", "Helvetica", "sans-serif"]
 
 
 class HomeTab(QWidget):
@@ -73,6 +65,8 @@ class HomeTab(QWidget):
     """
 
     curation_changed = pyqtSignal()
+    verification_commit_requested = pyqtSignal(str)
+    open_html_requested = pyqtSignal()  # demande d'ouverture du rapport HTML
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -82,7 +76,16 @@ class HomeTab(QWidget):
         self._denom_cd45_only: bool = False
         self._raw_mrd_result: Any = None  # MRDResult brut stocké pour recalcul
         self._current_method: str = "all"
+        # Débounce des notifications de curation pour éviter le lag UI
+        # (patch HTML/FCS coûteux déclenché dans MainWindow).
+        self._curation_emit_timer = QTimer(self)
+        self._curation_emit_timer.setSingleShot(True)
+        self._curation_emit_timer.timeout.connect(self.curation_changed.emit)
         self._build_ui()
+
+    def _schedule_curation_changed(self) -> None:
+        """Agrège les changements rapides KEEP/DISCARD en une seule notification."""
+        self._curation_emit_timer.start(500)
 
     # ------------------------------------------------------------------
     # Construction UI
@@ -295,6 +298,11 @@ class HomeTab(QWidget):
         self._patient_card = self._build_patient_card()
         self._results_layout.addWidget(self._patient_card)
 
+        # ── Bouton HTML spider plot ELN (visible uniquement si mode ELN actif) ──
+        self._eln_btn_bar = self._build_eln_html_bar()
+        self._results_layout.addWidget(self._eln_btn_bar)
+        self._eln_btn_bar.hide()
+
         # ── Bande de décision clinique (priorité de lecture) ──
         self._summary_card = self._build_summary_card()
         self._results_layout.addWidget(self._summary_card, 0)
@@ -320,6 +328,9 @@ class HomeTab(QWidget):
         self._node_table.combo_filter.currentIndexChanged.connect(self._on_node_filter_changed)
         self._node_table.curated_ratio_changed.connect(self._on_curated_ratio_changed)
         self._node_table.manually_added_nodes_changed.connect(self._on_manually_added_nodes_changed)
+        self._node_table.verification_commit_requested.connect(
+            self._on_verification_commit_requested
+        )
         # Expanding/Expanding : la grille de validation réclame tout l'espace
         # vertical restant. setMinimumHeight est le filet de sécurité absolu
         # (déjà défini dans MRDNodeTable.__init__, répété ici par cohérence).
@@ -328,43 +339,6 @@ class HomeTab(QWidget):
         # stretch=1 : reçoit tout l'espace vertical non attribué par les
         # widgets à stretch=0 au-dessus (patient_card, denom_bar, gauges, summary).
         self._results_layout.addWidget(self._node_table, 1)
-
-        # ── Mini Spider Plots des nœuds MRD ──
-        self._spider_section = QWidget()
-        self._spider_section.setStyleSheet("background: transparent;")
-        spider_v = QVBoxLayout(self._spider_section)
-        spider_v.setContentsMargins(0, 0, 0, 0)
-        spider_v.setSpacing(6)
-
-        self._spider_lbl = QLabel("Profils d'Expression — Clusters MRD (Radar)")
-        self._spider_lbl.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self._spider_lbl.setStyleSheet(f"color: {_LAVENDER};")
-        spider_v.addWidget(self._spider_lbl)
-
-        # ScrollArea horizontal pour les spider plots (8 plots × 244px = déborde sinon)
-        spider_scroll = QScrollArea()
-        spider_scroll.setWidgetResizable(True)
-        spider_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        spider_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        spider_scroll.setFixedHeight(290)
-        spider_scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
-            QScrollBar:horizontal {{ background: {_SURFACE1}; height: 6px; border-radius: 3px; }}
-            QScrollBar::handle:horizontal {{ background: {_SUBTEXT}; border-radius: 3px; }}
-        """)
-
-        self._spider_grid_widget = QWidget()
-        self._spider_grid_widget.setStyleSheet("background: transparent;")
-        self._spider_grid = QHBoxLayout(self._spider_grid_widget)
-        self._spider_grid.setContentsMargins(4, 4, 4, 4)
-        self._spider_grid.setSpacing(10)
-        spider_scroll.setWidget(self._spider_grid_widget)
-        spider_v.addWidget(spider_scroll)
-
-        # stretch=0 : la section spider est masquée par défaut et ne prend de
-        # place que quand elle est visible ; elle ne doit pas voler d'espace.
-        self._results_layout.addWidget(self._spider_section, 0)
-        self._spider_section.hide()
 
         # Pas de addStretch() ici : le stretch=1 sur _node_table absorbe déjà
         # tout l'espace résiduel. Un stretch supplémentaire comprimerait la grille.
@@ -376,6 +350,62 @@ class HomeTab(QWidget):
 
         scroll.setWidget(content)
         return scroll
+
+    def _build_eln_html_bar(self) -> QWidget:
+        """Barre de raccourci vers le rapport HTML avec spider plot ELN."""
+        bar = QWidget()
+        bar.setObjectName("elnHtmlBar")
+        bar.setStyleSheet(f"""
+            QWidget#elnHtmlBar {{
+                background: rgba(255, 155, 61, 0.10);
+                border-radius: 0px;
+                border: 1px solid rgba(255, 155, 61, 0.40);
+                border-left: 2px solid rgba(255, 155, 61, 0.80);
+            }}
+        """)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(12)
+
+        icon_lbl = QLabel("⬡")
+        icon_lbl.setFont(QFont("Segoe UI", 14))
+        icon_lbl.setStyleSheet("color: #FF9B3D; background: transparent;")
+        layout.addWidget(icon_lbl)
+
+        lbl = QLabel("MODE ELN — Porte Biologique 2022 activée")
+        lbl.setFont(QFont("Consolas", 8, QFont.Bold))
+        lbl.setStyleSheet("color: #FF9B3D; background: transparent; letter-spacing: 0.10em;")
+        layout.addWidget(lbl)
+        layout.addStretch()
+
+        self.btn_eln_html = QPushButton("  Ouvrir Spider Plot HTML")
+        self.btn_eln_html.setFixedHeight(30)
+        self.btn_eln_html.setMinimumWidth(200)
+        self.btn_eln_html.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255,155,61,0.18);
+                color: #FF9B3D;
+                border: 1px solid rgba(255,155,61,0.55);
+                border-radius: 0px;
+                padding: 0 14px;
+                font-size: 10px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,155,61,0.30);
+                border-color: rgba(255,155,61,0.75);
+            }}
+            QPushButton:pressed {{
+                background: rgba(255,155,61,0.38);
+            }}
+        """)
+        self.btn_eln_html.clicked.connect(self.open_html_requested)
+        layout.addWidget(self.btn_eln_html)
+        return bar
+
+    def show_eln_html_bar(self, visible: bool) -> None:
+        """Affiche/masque la barre de raccourci ELN HTML."""
+        self._eln_btn_bar.setVisible(visible)
 
     def _build_denom_bar(self) -> QWidget:
         """Barre de contrôle explicite du dénominateur MRD actif."""
@@ -400,9 +430,7 @@ class HomeTab(QWidget):
 
         lbl = QLabel("MODE DÉNOMINATEUR")
         lbl.setFont(QFont("Consolas", 8, QFont.Bold))
-        lbl.setStyleSheet(
-            "color: #EEF2F7; background: transparent; letter-spacing: 0.12em;"
-        )
+        lbl.setStyleSheet("color: #EEF2F7; background: transparent; letter-spacing: 0.12em;")
         layout.addWidget(lbl)
 
         self.lbl_denom_active = QLabel("TOTAL PATHO")
@@ -419,9 +447,7 @@ class HomeTab(QWidget):
 
         self.lbl_denom_status = QLabel("Toutes cellules pathologiques")
         self.lbl_denom_status.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
-        self.lbl_denom_status.setStyleSheet(
-            "color: #EEF2F7; background: transparent;"
-        )
+        self.lbl_denom_status.setStyleSheet("color: #EEF2F7; background: transparent;")
         layout.addWidget(self.lbl_denom_status)
 
         self.lbl_denom_count = QLabel("")
@@ -569,9 +595,7 @@ class HomeTab(QWidget):
 
         lbl = QLabel("DÉCISION CLINIQUE")
         lbl.setFont(QFont("Consolas", 8, QFont.Bold))
-        lbl.setStyleSheet(
-            "color: #EEF2F7; background: transparent; letter-spacing: 0.12em;"
-        )
+        lbl.setStyleSheet("color: #EEF2F7; background: transparent; letter-spacing: 0.12em;")
         v.addWidget(lbl)
 
         self.lbl_clinical = QLabel("—")
@@ -586,6 +610,13 @@ class HomeTab(QWidget):
             "color: #EEF2F7; background: transparent; font-size: 10.5px; font-weight: 600;"
         )
         v.addWidget(self.lbl_decision_ref)
+
+        self.lbl_validation_status = QLabel("")
+        self.lbl_validation_status.setWordWrap(True)
+        self.lbl_validation_status.setStyleSheet(
+            "color: #39FF8A; background: transparent; font-size: 10px; font-weight: 700;"
+        )
+        v.addWidget(self.lbl_validation_status)
 
         self.lbl_decision_denom = QLabel("")
         self.lbl_decision_denom.setWordWrap(True)
@@ -800,8 +831,6 @@ class HomeTab(QWidget):
             marker_cols=self._marker_cols,
             total_viable_cells=max(total_viable, 1),
         )
-        # Afficher les spider plots pour la sélection initiale
-        self._refresh_spider_plots(nodes, method_label="")
 
     def _on_curated_ratio_changed(self, method: str, ratio: float, n_mrd_cells: int) -> None:
         """
@@ -840,14 +869,14 @@ class HomeTab(QWidget):
             {
                 "pct": ratio,
                 "n_cells": n_mrd_cells,
-                "n_nodes": sum(1 for c in self._node_table._cards if c.is_included),
+                "n_nodes": len(self._node_table.get_human_curated_results()),
                 "positive": ratio > 0.01,
                 "low_level": 0 < ratio <= 0.01,
                 "positivity_threshold": 0.01,
             }
         )
-        # Notifie MainWindow → patch HTML + inject curation
-        self.curation_changed.emit()
+        # Notifie MainWindow (déboucé) → patch HTML + inject curation
+        self._schedule_curation_changed()
 
     def _on_manually_added_nodes_changed(self, manual_nodes: list) -> None:
         """
@@ -857,14 +886,19 @@ class HomeTab(QWidget):
         les nœuds retenus, pas seulement les manuels) et émet curation_changed
         pour que MainWindow mette à jour l'HTML + son _result interne.
         """
-        all_curated = self._node_table.get_human_curated_results()
-        # Rafraîchir les spider plots qu'il y ait des nœuds ou non
-        self._refresh_spider_plots(
-            all_curated,
-            method_label="Expert" if manual_nodes else "",
+        # Signale à MainWindow qu'une curation a eu lieu → patch HTML (déboucé)
+        self._schedule_curation_changed()
+
+    def _on_verification_commit_requested(self, filter_label: str) -> None:
+        """Relaye la demande explicite de validation finale à MainWindow."""
+        self.verification_commit_requested.emit(filter_label)
+
+    def set_validation_status(self, method_label: str, filter_label: str) -> None:
+        """Affiche l'état de validation explicite dans le bandeau de décision."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.lbl_validation_status.setText(
+            f"Validation experte appliquée ({ts}) — Méthode FCS: {method_label.upper()} · Filtre: {filter_label}"
         )
-        # Signale à MainWindow qu'une curation a eu lieu → patch HTML
-        self.curation_changed.emit()
 
     # ------------------------------------------------------------------
     # Toggle dénominateur MRD
@@ -1044,191 +1078,5 @@ class HomeTab(QWidget):
         return gauges
 
     def _on_node_filter_changed(self) -> None:
-        """Rafraîchit les spider plots quand le filtre de méthode change."""
-        selected = self._node_table.combo_filter.currentText()
-        if selected == "Toutes les méthodes":
-            filtered = self._mrd_nodes_all
-            method_label = ""
-        elif selected == "JF":
-            filtered = [n for n in self._mrd_nodes_all if n["is_mrd_jf"]]
-            method_label = "JF"
-        elif selected == "Flo":
-            filtered = [n for n in self._mrd_nodes_all if n["is_mrd_flo"]]
-            method_label = "Flo"
-        elif selected in ("ELN 2025", "ELN"):
-            filtered = [n for n in self._mrd_nodes_all if n["is_mrd_eln"]]
-            method_label = "ELN"
-        else:
-            filtered = self._mrd_nodes_all
-            method_label = ""
-        self._refresh_spider_plots(filtered, method_label=method_label)
-
-    # Marqueurs techniques à exclure du spider plot (pas cliniquement pertinents)
-    _TECHNICAL_MARKERS = {
-        "fsc-a",
-        "fsc-h",
-        "fsc-w",
-        "ssc-a",
-        "ssc-h",
-        "ssc-w",
-        "time",
-        "event_",
-        "event",
-        "width",
-        "height",
-        "area",
-        "fsc",
-        "ssc",
-    }
-
-    def _filter_clinical_markers(self, markers: List[str]) -> List[str]:
-        """Retourne uniquement les marqueurs cliniques (exclut FSC, SSC, Time, etc.)."""
-        result = []
-        for m in markers:
-            m_low = m.lower().strip()
-            if any(m_low == t or m_low.startswith(t) for t in self._TECHNICAL_MARKERS):
-                continue
-            result.append(m)
-        return result
-
-    # Palette PRISMA v2.0 — cytometric channels, visuellement distincts sur fond sombre
-    _NODE_COLORS = [
-        "#7B52FF",  # V450 · brand
-        "#39FF8A",  # FITC · accent
-        "#5BAAFF",  # V500 · info
-        "#FF9B3D",  # PE   · warm
-        "#FF3D6E",  # APC  · danger
-        "#FFE032",  # PerCP· warn
-        "#7EC8E3",  # SSC  · steel
-        "#E8F4FF",  # FSC  · light
-    ]
-
-    def _refresh_spider_plots(self, nodes: List[Dict], *, method_label: str = "") -> None:
-        """
-        Génère les mini spider plots pour les nœuds MRD filtrés (max 8).
-
-        Normalisation par nœud (identique à plot_cluster_radar_mrd) :
-        chaque profil est mis à l'échelle sur son propre min/max pour que
-        la forme du radar reflète fidèlement le profil d'expression relatif,
-        exactement comme dans le rapport HTML Méthode JF/Flo.
-        """
-        # Vider l'ancienne grille
-        while self._spider_grid.count():
-            item = self._spider_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if not nodes or self._mfi_data is None or not self._marker_cols:
-            self._spider_section.hide()
-            return
-
-        import numpy as np
-
-        # Exclure les marqueurs techniques
-        markers = self._filter_clinical_markers(self._marker_cols)
-        n_markers = len(markers)
-        if n_markers < 3:
-            self._spider_section.hide()
-            return
-
-        # Mettre à jour le titre de section avec méthode + nombre de nœuds
-        n_nodes = len(nodes)
-        if method_label:
-            title_text = (
-                f"Profils d'Expression — Clusters MRD Méthode {method_label} (Radar)"
-                f"  ·  {n_nodes} nœud(s)"
-            )
-        else:
-            title_text = f"Profils d'Expression — Clusters MRD (Radar)  ·  {n_nodes} nœud(s)"
-        self._spider_lbl.setText(title_text)
-
-        angles = np.linspace(0, 2 * np.pi, n_markers, endpoint=False).tolist()
-        angles_closed = angles + angles[:1]
-
-        max_plots = min(n_nodes, 8)
-        display_nodes = nodes[:max_plots]
-
-        # Labels marqueurs courts
-        short_labels = []
-        for m in markers:
-            parts = m.strip().split()
-            candidate = parts[-1] if len(parts) > 1 else parts[0]
-            short_labels.append(candidate[:10])
-
-        for idx, node in enumerate(display_nodes):
-            node_id = node["node_id"]
-            if node_id not in self._mfi_data.index:
-                continue
-
-            mfi_row = self._mfi_data.loc[node_id, markers].values.astype(float)
-
-            # ── Normalisation par nœud (identique à plot_cluster_radar_mrd) ──
-            v_min, v_max = float(mfi_row.min()), float(mfi_row.max())
-            norm_vals = (mfi_row - v_min) / (v_max - v_min + 1e-10)
-            vals = list(norm_vals) + [norm_vals[0]]
-
-            pct_p = node["pct_patho"]
-            node_color = self._NODE_COLORS[idx % len(self._NODE_COLORS)]
-
-            # Widget conteneur (radar + label sous)
-            container = QWidget()
-            container.setStyleSheet(f"background: {_SURFACE0}; border-radius: 0px;")
-            c_layout = QVBoxLayout(container)
-            c_layout.setContentsMargins(6, 6, 6, 6)
-            c_layout.setSpacing(3)
-
-            # Figure matplotlib radar
-            fig = Figure(figsize=(2.8, 2.8), dpi=88)
-            fig.patch.set_facecolor(_SURFACE0)
-            ax = fig.add_subplot(111, polar=True)
-            ax.set_facecolor(_BASE)
-
-            # Tracé avec couleur PRISMA distincte par nœud
-            ax.plot(angles_closed, vals, color=node_color, linewidth=2.2, zorder=3)
-            ax.fill(angles_closed, vals, color=node_color, alpha=0.18, zorder=2)
-
-            # Grille radiale discrète
-            ax.set_ylim(0, 1.05)
-            ax.set_yticks([0.33, 0.66, 1.0])
-            ax.set_yticklabels([])
-            ax.yaxis.grid(True, color=(1, 1, 1, 0.12), linewidth=0.5, linestyle=":")
-            ax.spines["polar"].set_color("rgba(255,255,255,0.10)" if False else (1, 1, 1, 0.10))
-            ax.spines["polar"].set_linewidth(0.6)
-
-            ax.set_xticks(angles)
-            ax.set_xticklabels(
-                short_labels,
-                fontsize=7,
-                color=_TEXT,
-                fontweight="600",
-                fontfamily=_FONT_FALLBACK,
-            )
-            ax.tick_params(axis="x", pad=9)
-
-            # Marges pour laisser de la place aux labels
-            fig.subplots_adjust(top=0.88, bottom=0.10, left=0.10, right=0.90)
-
-            canvas = FigureCanvas(fig)
-            canvas.setMinimumSize(246, 246)
-            canvas.setMaximumSize(280, 280)
-            c_layout.addWidget(canvas)
-
-            # Label sous le radar : nœud + % patho + méthode
-            label_parts = [f"Nœud {node_id}"]
-            if method_label:
-                label_parts.append(f"[{method_label}]")
-            label_parts.append(f"{pct_p:.0f}% patho")
-            lbl_node = QLabel("  —  ".join(label_parts))
-            lbl_node.setAlignment(Qt.AlignCenter)
-            lbl_node.setStyleSheet(
-                f"color: {node_color}; font-size: 10px; font-weight: bold; background: transparent;"
-            )
-            c_layout.addWidget(lbl_node)
-
-            container.setFixedWidth(290)
-            self._spider_grid.addWidget(container)
-
-        self._spider_grid.addStretch()
-        self._spider_section.show()
-
-
+        """Appelé quand le filtre de méthode du tableau nœuds change (hook pour extensions futures)."""
+        pass

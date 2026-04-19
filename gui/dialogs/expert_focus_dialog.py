@@ -23,7 +23,7 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Set
 
-from PyQt5.QtCore import Qt, pyqtSignal, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QDialog,
@@ -124,6 +124,7 @@ class ExpertNodeCard(QFrame):
         mfi_data: Any = None,
         marker_cols: Optional[List[str]] = None,
         initial_included: bool = False,
+        radar_cache: Optional[Dict] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -131,6 +132,7 @@ class ExpertNodeCard(QFrame):
         self._node_id: int = int(node.get("node_id", 0))
         self._mfi_data = mfi_data
         self._marker_cols: List[str] = marker_cols or []
+        self._radar_cache = radar_cache  # dict partagé {node_id: pixmap_data}
 
         self._is_jf = bool(node.get("is_mrd_jf", False))
         self._is_flo = bool(node.get("is_mrd_flo", False))
@@ -219,8 +221,9 @@ class ExpertNodeCard(QFrame):
         sep.setStyleSheet("color: rgba(137,180,250,0.10); max-height:1px;")
         root.addWidget(sep)
 
-        # ── Zone radar ───────────────────────────────────────────────────
-        self._radar_widget = self._build_radar()
+        # ── Zone radar (placeholder léger, rendu différé) ────────────────
+        self._radar_widget = self._build_radar_placeholder()
+        self._radar_loaded = False
         root.addWidget(self._radar_widget, 1)
 
         # ── Infos cellules ───────────────────────────────────────────────
@@ -262,6 +265,37 @@ class ExpertNodeCard(QFrame):
         btn_row.addWidget(self._btn_keep)
         btn_row.addWidget(self._btn_discard)
         root.addLayout(btn_row)
+
+    def load_radar_deferred(self) -> None:
+        """Remplace le placeholder par le vrai radar matplotlib (appelé en différé)."""
+        if self._radar_loaded:
+            return
+        self._radar_loaded = True
+        try:
+            if self._mfi_data is None:
+                return
+            # On crée toujours un nouveau widget : les FigureCanvas Qt ne peuvent pas
+            # être partagés entre layouts (parent unique), et deleteLater() peut laisser
+            # un parent() == None sur un widget déjà détruit.
+            new_radar = self._build_radar_matplotlib()
+        except Exception as _e:
+            import traceback as _tb
+
+            print(f"[ExpertFocusView] Radar erreur nœud {self._node_id}: {_e}\n{_tb.format_exc()}")
+            return
+        layout = self.layout()
+        if layout is None:
+            return
+        # Trouver et remplacer le placeholder
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() is self._radar_widget:
+                old = layout.takeAt(i)
+                if old and old.widget():
+                    old.widget().deleteLater()
+                layout.insertWidget(i, new_radar, 1)
+                self._radar_widget = new_radar
+                break
 
     def _build_radar(self) -> QWidget:
         try:
@@ -337,12 +371,15 @@ class ExpertNodeCard(QFrame):
 
         idx_key = self._resolve_mfi_index_key()
         if idx_key is None:
-            raise KeyError(f"node_id {self._node_id} absent de la matrice MFI")
-
-        row = self._mfi_data.loc[idx_key, markers]
-        if hasattr(row, "ndim") and row.ndim > 1:
-            row = row.iloc[0]
-        mfi_row = np.asarray(row.values, dtype=float)
+            # Nœud SOM vide (aucune cellule dans ce nœud) — radar plat à zéro
+            mfi_row = np.zeros(len(markers), dtype=float)
+            _empty_node = True
+        else:
+            row = self._mfi_data.loc[idx_key, markers]
+            if hasattr(row, "ndim") and row.ndim > 1:
+                row = row.iloc[0]
+            mfi_row = np.asarray(row.values, dtype=float)
+            _empty_node = False
 
         if mfi_row.size < 3:
             raise ValueError("Profil MFI insuffisant pour radar")
@@ -362,8 +399,10 @@ class ExpertNodeCard(QFrame):
         angles += angles[:1]
         norm_values = list(norm_values) + [norm_values[0]]
 
-        # Couleur PRISMA : brand violet si algo/sélectionné, accent vert si manuel, dim si inactif
-        if self._is_algo:
+        # Couleur PRISMA : gris si nœud vide, violet si algo, vert si manuel, dim sinon
+        if _empty_node:
+            radar_color = (0.45, 0.45, 0.55, 0.40)  # gris dim — nœud sans cellules
+        elif self._is_algo:
             radar_color = "#7B52FF"  # brand — V450
         elif self._is_manual:
             radar_color = "#39FF8A"  # accent — FITC
@@ -378,6 +417,18 @@ class ExpertNodeCard(QFrame):
         ax.plot(angles, norm_values, color=radar_color, linewidth=1.6)
         ax.fill(angles, norm_values, color=radar_color, alpha=0.18)
 
+        if _empty_node:
+            ax.text(
+                0,
+                0,
+                "vide",
+                ha="center",
+                va="center",
+                fontsize=7,
+                color=(0.6, 0.6, 0.7, 0.7),
+                transform=ax.transData,
+            )
+
         ax.set_ylim(0, 1.05)
         ax.set_yticks([0.33, 0.66, 1.0])
         ax.set_xticks(angles[:-1])
@@ -388,7 +439,7 @@ class ExpertNodeCard(QFrame):
             fontfamily=["Segoe UI", "Arial", "Arial", "sans-serif"],
         )
         ax.set_yticklabels([])
-        # Axes/spokes plus lisibles en fond sombre (demande Expert Focus)
+        # Axes/spokes plus lisibles en fond sombre
         ax.yaxis.grid(True, color=(1, 1, 1, 0.26), linewidth=0.7, linestyle=":")
         ax.xaxis.grid(True, color=(1, 1, 1, 0.22), linewidth=0.6, linestyle="-")
         ax.spines["polar"].set_color((1, 1, 1, 0.52))
@@ -571,6 +622,8 @@ class ExpertFocusDialog(QDialog):
     """
 
     nodes_manually_added = pyqtSignal(list)
+    # Payload: {"included_ids": List[int], "manual_ids": List[int]}
+    curation_applied = pyqtSignal(dict)
 
     # Largeur minimale d'une carte pour le calcul des colonnes
     _CARD_MIN_W: int = 220
@@ -602,6 +655,8 @@ class ExpertFocusDialog(QDialog):
         self._active_filter_idx: int = 0  # index du combo filtre
         self._search_text: str = ""
         self._cards: List[ExpertNodeCard] = []
+        # Cache des widgets radar déjà rendus : {node_id: QWidget}
+        self._radar_cache: Dict[int, Any] = {}
 
         self._build_ui()
         self._populate_grid()
@@ -978,6 +1033,7 @@ class ExpertFocusDialog(QDialog):
                 mfi_data=self._mfi_data,
                 marker_cols=self._marker_cols,
                 initial_included=initial,
+                radar_cache=self._radar_cache,
                 parent=None,
             )
             card.decisionChanged.connect(self._on_card_decision_changed)
@@ -997,9 +1053,41 @@ class ExpertFocusDialog(QDialog):
 
         self._refresh_stats()
 
+        # Annuler tout batch précédent en cours, puis démarrer le nouveau
+        self._radar_batch_gen = iter(list(self._cards))
+        self._radar_batch_id = getattr(self, "_radar_batch_id", 0) + 1
+        _bid = self._radar_batch_id
+        QTimer.singleShot(0, lambda: self._pump_radar_batch(_bid))
+
+    def _pump_radar_batch(self, batch_id: int, chunk: int = 6) -> None:
+        """Charge `chunk` radars puis cède la main à l'event loop, jusqu'à épuisement."""
+        if batch_id != self._radar_batch_id:
+            return  # Ce batch est périmé (un nouveau _populate_grid a été appelé)
+        gen = getattr(self, "_radar_batch_gen", None)
+        if gen is None:
+            return
+        loaded = 0
+        while loaded < chunk:
+            try:
+                card = next(gen)
+            except StopIteration:
+                return
+            try:
+                card.load_radar_deferred()
+            except Exception:
+                pass
+            loaded += 1
+        QTimer.singleShot(15, lambda: self._pump_radar_batch(batch_id, chunk))
+
     # ──────────────────────────────────────────────────────────────────────────
     # Slots
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _schedule_radar_batch(self, cards: List, batch_size: int = 8, delay_ms: int = 0) -> None:
+        """Obsolète — conservé pour compatibilité, délègue au nouveau pump."""
+        pass
+
+        QTimer.singleShot(delay_ms, _load_batch)
 
     def _on_filter_changed(self, idx: int) -> None:
         self._active_filter_idx = idx
@@ -1020,9 +1108,14 @@ class ExpertFocusDialog(QDialog):
         en réconciliant les cartes visibles et les états persistés.
         """
         # Pour les cartes actuellement visibles : état direct
-        visible_ids = {c.node_id for c in self._cards}
         for c in self._cards:
             self._initial_included[c.node_id] = c.is_included
+
+        included_ids = [
+            int(node.get("node_id", 0))
+            for node in self._all_nodes
+            if self._initial_included.get(int(node.get("node_id", 0)), False)
+        ]
 
         # Construire la liste finale : tous les nœuds non-algo marqués comme inclus
         manually_added = [
@@ -1031,6 +1124,12 @@ class ExpertFocusDialog(QDialog):
             if not (node.get("is_mrd_jf") or node.get("is_mrd_flo") or node.get("is_mrd_eln"))
             and self._initial_included.get(int(node.get("node_id", 0)), False)
         ]
+        self.curation_applied.emit(
+            {
+                "included_ids": included_ids,
+                "manual_ids": [int(n.get("node_id", 0)) for n in manually_added],
+            }
+        )
         self.nodes_manually_added.emit(manually_added)
         self.accept()
 
@@ -1079,7 +1178,15 @@ class ExpertFocusDialog(QDialog):
         new_cols = min(new_cols, len(self._cards))
         current_cols = self._grid.columnCount()
         if new_cols != current_cols:
-            self._populate_grid()
+            # Debounce : annule le timer précédent si resize rapide (ex: passage plein écran)
+            if hasattr(self, "_resize_timer") and self._resize_timer is not None:
+                self._resize_timer.stop()
+            from PyQt5.QtCore import QTimer as _QTimer
+
+            self._resize_timer = _QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._populate_grid)
+            self._resize_timer.start(150)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Styles helper
@@ -1152,5 +1259,3 @@ class ExpertFocusDialog(QDialog):
             if not (node.get("is_mrd_jf") or node.get("is_mrd_flo") or node.get("is_mrd_eln"))
             and self._initial_included.get(int(node.get("node_id", 0)), False)
         ]
-
-
