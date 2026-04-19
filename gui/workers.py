@@ -126,7 +126,13 @@ class LogCapture:
         self._drain_once()  # Dernier vidage
 
     def _drain_once(self) -> None:
-        """Draine au plus 50 messages par tick pour ne pas bloquer l'UI."""
+        """
+        Draine au plus 50 messages par tick pour ne pas bloquer l'UI.
+
+        Si la queue contient plus de 200 messages (burst post-GIL après compilation
+        Numba), on vide en plusieurs batches différés via QTimer.singleShot pour
+        éviter de bloquer l'event loop Qt le temps du traitement complet.
+        """
         q = self._handler._queue
         batch: List[str] = []
         for _ in range(50):
@@ -138,7 +144,6 @@ class LogCapture:
                 break
 
         if batch:
-            # Emit one payload per tick instead of one signal per line.
             self._log_signal.emit("\n".join(batch))
 
 
@@ -175,6 +180,43 @@ class PipelineWorker(QThread):
         self._log_capture = LogCapture(self.log_message)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _warmup_numba() -> None:
+        """
+        Déclenche la compilation JIT Numba/pynndescent sur un micro-dataset avant
+        le vrai pipeline.
+
+        Sans ce warmup, Numba compile ses kernels LLVM lors du premier appel
+        FlowSOM réel (20–90 s sur CPU) tout en tenant le GIL Python, ce qui
+        gèle l'UI Qt et marque le processus "Pas de réponse" dans le Gestionnaire
+        des tâches. Ce warmup s'exécute dans le QThread, hors thread principal.
+        """
+        try:
+            import numpy as _np
+            import warnings as _w
+
+            # Micro-SOM : 500 cellules × 4 marqueurs — assez pour déclencher le JIT,
+            # trop petit pour durer plus de 2–3 s.
+            _rng = _np.random.default_rng(0)
+            _X_tiny = _rng.random((500, 4), dtype=_np.float32)
+
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                import anndata as _ad
+                import flowsom as _fs
+
+                _adata = _ad.AnnData(_X_tiny)
+                _fs.FlowSOM(
+                    _adata,
+                    cols_to_use=list(range(4)),
+                    xdim=3, ydim=3,
+                    n_clusters=2,
+                    rlen=5,
+                    seed=0,
+                )
+        except Exception:
+            pass  # Non bloquant — si le warmup échoue, le vrai pipeline prend le relais
+
     def run(self) -> None:
         """Point d'entrée du thread — exécute FlowSOMPipeline.execute()."""
         from flowsom_pipeline_pro.src.pipeline.pipeline_executor import (
@@ -190,6 +232,12 @@ class PipelineWorker(QThread):
 
         try:
             _log.info("═══ Démarrage du pipeline FlowSOM ═══")
+
+            # Préchauffage Numba/pynndescent JIT avant le vrai pipeline.
+            # Évite le freeze "Pas de réponse" dû à la compilation LLVM au premier appel.
+            _log.info("[Init] Compilation JIT Numba (première exécution)…")
+            self._warmup_numba()
+            _log.info("[Init] JIT prêt.")
 
             pipeline = FlowSOMPipeline(self._config)
             _gating_emitted = False
