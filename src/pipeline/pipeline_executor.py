@@ -173,9 +173,7 @@ class PipelineCheckpointManager:
     def __init__(self, config: PipelineConfig) -> None:
         ckpt_cfg = dict(getattr(config, "_extra", {}).get("checkpointing", {}) or {})
         self.enabled = bool(ckpt_cfg.get("enabled", True)) and _JOBLIB_AVAILABLE
-        self.base_dir = Path(
-            ckpt_cfg.get("cache_dir", Path(config.paths.output_dir) / "cache")
-        )
+        self.base_dir = Path(ckpt_cfg.get("cache_dir", Path(config.paths.output_dir) / "cache"))
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         if not _JOBLIB_AVAILABLE:
@@ -509,11 +507,7 @@ class FlowSOMPipeline:
 
         _base_output = Path(config.paths.output_dir)
         _patho_stem = Path(_single_patho).stem if _single_patho else None
-        output_dir = (
-            _base_output / f"résultats_{_patho_stem}"
-            if _patho_stem
-            else _base_output
-        )
+        output_dir = _base_output / f"résultats_{_patho_stem}" if _patho_stem else _base_output
         output_dir.mkdir(parents=True, exist_ok=True)
 
         _logger.info("Étape 2: Prétraitement (gating combiné + transformation)...")
@@ -527,17 +521,19 @@ class FlowSOMPipeline:
         if gating_ckpt is not None:
             processed_samples = gating_ckpt.get("processed_samples", [])
             gating_figures = {}
-            self._gating_logger = _restore_gating_logger(
-                gating_ckpt.get("gating_events", [])
-            )
+            self._gating_logger = _restore_gating_logger(gating_ckpt.get("gating_events", []))
             n_total_for_sankey = int(gating_ckpt.get("n_total_raw", 0))
-            _logger.info("  Checkpoint post-gating utilisé: %d échantillon(s)", len(processed_samples))
+            _logger.info(
+                "  Checkpoint post-gating utilisé: %d échantillon(s)", len(processed_samples)
+            )
         else:
             _logger.info("Étape 1: Chargement des fichiers FCS...")
             _report(PipelineStep.LOADING)
             samples = self._load_all_samples()
             if not samples:
-                return GatingResult(success=False, error="Aucun échantillon chargé", timestamp=timestamp)
+                return GatingResult(
+                    success=False, error="Aucun échantillon chargé", timestamp=timestamp
+                )
 
             n_total_for_sankey = int(sum(s.matrix.shape[0] for s in samples))
             processed_samples, gating_figures, gating_checkpoint = preprocess_combined(
@@ -606,8 +602,7 @@ class FlowSOMPipeline:
         """
         if not gating_result.success:
             raise ValueError(
-                f"execute_clustering() appelé avec un GatingResult en échec : "
-                f"{gating_result.error}"
+                f"execute_clustering() appelé avec un GatingResult en échec : {gating_result.error}"
             )
         # Injecte les données de gating dans l'état interne et délègue à execute()
         # en court-circuitant la phase de gating via le checkpoint déjà sauvegardé.
@@ -649,7 +644,7 @@ class FlowSOMPipeline:
         singlets_summary_per_file.clear()
 
         _logger.info("=" * 60)
-        _logger.info("PIPELINE FLOWSOM — DÉMARRAGE")
+        _logger.info("PRISMA — DÉMARRAGE")
         _logger.info("=" * 60)
         _report(PipelineStep.START)
 
@@ -734,9 +729,7 @@ class FlowSOMPipeline:
 
             # Mode unitaire : patho_single_file non défini → déduire depuis patho_folder
             if not _single_patho:
-                _patho_folder_path = Path(
-                    getattr(config.paths, "patho_folder", "") or ""
-                )
+                _patho_folder_path = Path(getattr(config.paths, "patho_folder", "") or "")
                 if _patho_folder_path.exists():
                     _patho_files_found = get_fcs_files(_patho_folder_path)
                     if len(_patho_files_found) == 1:
@@ -777,9 +770,7 @@ class FlowSOMPipeline:
             if gating_ckpt is not None:
                 processed_samples = gating_ckpt.get("processed_samples", [])
                 gating_figures = {}
-                self._gating_logger = _restore_gating_logger(
-                    gating_ckpt.get("gating_events", [])
-                )
+                self._gating_logger = _restore_gating_logger(gating_ckpt.get("gating_events", []))
                 n_total_for_sankey = int(gating_ckpt.get("n_total_raw", 0))
                 _logger.info(
                     "  Checkpoint post-gating utilisé: %d échantillon(s)",
@@ -801,13 +792,11 @@ class FlowSOMPipeline:
                 n_total_for_sankey = int(sum(s.matrix.shape[0] for s in samples))
                 _logger.info("  %d échantillon(s) chargé(s)", len(samples))
 
-                processed_samples, gating_figures, gating_checkpoint = (
-                    preprocess_combined(
-                        samples,
-                        config,
-                        gating_logger=self._gating_logger,
-                        gating_plot_dir=output_dir / "plots" if viz_save else None,
-                    )
+                processed_samples, gating_figures, gating_checkpoint = preprocess_combined(
+                    samples,
+                    config,
+                    gating_logger=self._gating_logger,
+                    gating_plot_dir=output_dir / "plots" if viz_save else None,
                 )
 
                 checkpoint_manager.save(
@@ -815,9 +804,7 @@ class FlowSOMPipeline:
                     {
                         "processed_samples": processed_samples,
                         "gating_payload": gating_checkpoint,
-                        "gating_events": [
-                            e.to_dict() for e in self._gating_logger.events
-                        ],
+                        "gating_events": [e.to_dict() for e in self._gating_logger.events],
                         "n_total_raw": n_total_for_sankey,
                     },
                 )
@@ -903,9 +890,8 @@ class FlowSOMPipeline:
                 from flowsom_pipeline_pro.src.analysis.prescreening import (
                     compute_cd34_prescreening,
                 )
-                _density_method_ps = getattr(
-                    config.pregate, "cd34_cd45dim_density_method", "KDE"
-                )
+
+                _density_method_ps = getattr(config.pregate, "cd34_cd45dim_density_method", "KDE")
                 _logger.info(
                     "Étape 4c: Pré-screening CD34+/CD45dim (méthode=%s)...",
                     _density_method_ps,
@@ -914,7 +900,7 @@ class FlowSOMPipeline:
                 # (obs contient la colonne "condition" alignée sur X_stacked)
                 _patho_label = "Pathologique"
                 if "condition" in obs.columns:
-                    _patho_mask_ps = (obs["condition"].values == _patho_label)
+                    _patho_mask_ps = obs["condition"].values == _patho_label
                     _X_patho_ps = X_stacked[_patho_mask_ps]
                     _logger.info(
                         "   Pré-screening sur %d cellules patho uniquement",
@@ -949,9 +935,12 @@ class FlowSOMPipeline:
                             from flowsom_pipeline_pro.src.visualization.gating_plots import (
                                 plot_cd34_kde_prescreening as _plot_cd34_ps,
                             )
+
                             _fig_cd34_ps = _plot_cd34_ps(
                                 _prescreening_result,
-                                output_path=output_dir / "plots" / "gating"
+                                output_path=output_dir
+                                / "plots"
+                                / "gating"
                                 / f"prescreening_cd34_kde_{timestamp}.png",
                             )
                             if _fig_cd34_ps is not None:
@@ -962,9 +951,7 @@ class FlowSOMPipeline:
                                 _plot_ps_exc,
                             )
             except Exception as _ps_exc:
-                _logger.warning(
-                    "Pré-screening CD34/CD45dim échoué (non bloquant): %s", _ps_exc
-                )
+                _logger.warning("Pré-screening CD34/CD45dim échoué (non bloquant): %s", _ps_exc)
 
             # ── Étape 4b: Construction du DataFrame FCS complet ───────────────
             # Identique au monolithe flowsom_pipeline.py :
@@ -1001,9 +988,7 @@ class FlowSOMPipeline:
             _node_medians = np.array(
                 [np.median(chunk, axis=0) for chunk in _node_chunks], dtype=float
             )
-            node_mfi_matrix = pd.DataFrame(
-                _node_medians, index=_node_ids, columns=selected_markers
-            )
+            node_mfi_matrix = pd.DataFrame(_node_medians, index=_node_ids, columns=selected_markers)
 
             # ── Étape 5: Metrics de clustering ────────────────────────────────
             if _monitor:
@@ -1011,30 +996,25 @@ class FlowSOMPipeline:
             metrics = self._compute_metrics(X_stacked, metaclustering)
             # ── Accumulation des figures pour le rapport HTML ─────────────────
             # Clés calquées sur les noms du notebook de référence
-            _mpl_figures: Dict[str, object] = dict(
-                gating_figures
-            )  # fig_overview, fig_gate_*
+            _mpl_figures: Dict[str, object] = dict(gating_figures)  # fig_overview, fig_gate_*
             _plotly_figures: Dict[str, object] = {}
 
             # ── Diagnostic Harmony (si disponible) ────────────────────────────
             # _HARMONY_DIAG est rempli par _build_harmony_diag() dans
             # clustering_service.run_clustering() — non bloquant, silencieux.
             import flowsom_pipeline_pro.src.services.clustering_service as _cs_mod
+
             _hd = _cs_mod._HARMONY_DIAG
             if _hd.get("plotly") is not None:
                 _plotly_figures["fig_harmony_diag"] = _hd["plotly"]
             if _hd.get("mpl") is not None:
                 _mpl_figures["fig_harmony_diag"] = _hd["mpl"]
 
-            plot_cfg = dict(
-                getattr(config, "_extra", {}).get("plotting_worker", {}) or {}
-            )
+            plot_cfg = dict(getattr(config, "_extra", {}).get("plotting_worker", {}) or {})
             plot_async_enabled = bool(viz_save)
             plot_worker: Optional[PlottingWorker] = None
             if plot_async_enabled:
-                plot_worker = PlottingWorker(
-                    max_queue_size=int(plot_cfg.get("queue_size", 48))
-                )
+                plot_worker = PlottingWorker(max_queue_size=int(plot_cfg.get("queue_size", 48)))
                 plot_worker.start()
 
             # ── Étape 5b: UMAP (si save_plots ET umap_enabled) ───────────────────
@@ -1046,13 +1026,9 @@ class FlowSOMPipeline:
                     _report(PipelineStep.UMAP)
                     fig_cfg = getattr(viz_cfg, "figures", {}) or {}
                     umap_cfg = fig_cfg.get("umap", {})
-                    umap_sample_size = min(
-                        umap_cfg.get("n_sample", 100_000), X_stacked.shape[0]
-                    )
+                    umap_sample_size = min(umap_cfg.get("n_sample", 100_000), X_stacked.shape[0])
                     rng_umap = np.random.default_rng(config.flowsom.seed)
-                    idx_umap = rng_umap.choice(
-                        X_stacked.shape[0], umap_sample_size, replace=False
-                    )
+                    idx_umap = rng_umap.choice(X_stacked.shape[0], umap_sample_size, replace=False)
                     umap_coords = UMAP(
                         n_components=2, random_state=config.flowsom.seed, n_jobs=-1
                     ).fit_transform(X_stacked[idx_umap])
@@ -1123,9 +1099,7 @@ class FlowSOMPipeline:
                     output_dir / "plots" / f"mfi_heatmap_{timestamp}.png",
                 )
                 _cond_labels = (
-                    df_cells["condition"].values
-                    if "condition" in df_cells.columns
-                    else None
+                    df_cells["condition"].values if "condition" in df_cells.columns else None
                 )
                 self._enqueue_plot(
                     plot_worker,
@@ -1161,15 +1135,12 @@ class FlowSOMPipeline:
                             "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                             "plot_star_chart",
                             _fsom_native,
-                            output_dir
-                            / "plots"
-                            / f"flowsom_star_chart_{timestamp}.png",
+                            output_dir / "plots" / f"flowsom_star_chart_{timestamp}.png",
                         )
                     else:
                         _star_marker_names = (
                             list(processed_samples[0].markers)
-                            if processed_samples
-                            and hasattr(processed_samples[0], "markers")
+                            if processed_samples and hasattr(processed_samples[0], "markers")
                             else None
                         )
                         self._enqueue_plot(
@@ -1180,9 +1151,7 @@ class FlowSOMPipeline:
                             "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                             "plot_star_chart_custom",
                             clusterer,
-                            output_dir
-                            / "plots"
-                            / f"flowsom_star_chart_{timestamp}.png",
+                            output_dir / "plots" / f"flowsom_star_chart_{timestamp}.png",
                             marker_names=_star_marker_names,
                             title=f"FlowSOM Star Chart — GPU ({clusterer.xdim}×{clusterer.ydim})",
                         )
@@ -1193,9 +1162,7 @@ class FlowSOMPipeline:
             if viz_save:
                 try:
                     _cond_labels_grid = (
-                        df_cells["condition"].values
-                        if "condition" in df_cells.columns
-                        else None
+                        df_cells["condition"].values if "condition" in df_cells.columns else None
                     )
                     # plot_som_grid_static attend un metaclustering par NODE
                     # (n_nodes,), PAS par cellule (n_cells,).
@@ -1203,11 +1170,7 @@ class FlowSOMPipeline:
                     if _mc_per_node is None:
                         _mc_per_node = np.array(
                             [
-                                int(
-                                    np.bincount(
-                                        metaclustering[clustering == i]
-                                    ).argmax()
-                                )
+                                int(np.bincount(metaclustering[clustering == i]).argmax())
                                 if (clustering == i).any()
                                 else 0
                                 for i in range(clusterer.n_nodes)
@@ -1215,9 +1178,7 @@ class FlowSOMPipeline:
                             dtype=int,
                         )
                     _viz_cfg = getattr(config, "visualization", None)
-                    _som_max_cells = int(
-                        getattr(_viz_cfg, "som_grid_max_display_cells", 100_000)
-                    )
+                    _som_max_cells = int(getattr(_viz_cfg, "som_grid_max_display_cells", 100_000))
                     _som_dpi = int(getattr(_viz_cfg, "som_grid_dpi", 100))
                     self._enqueue_plot(
                         plot_worker,
@@ -1238,16 +1199,12 @@ class FlowSOMPipeline:
                         max_display_cells=_som_max_cells,
                     )
                 except Exception as _e:
-                    _logger.warning(
-                        "Grille SOM statique échouée (non bloquant): %s", _e
-                    )
+                    _logger.warning("Grille SOM statique échouée (non bloquant): %s", _e)
 
             # ── Radar + bar charts + vue combinée ────────────────────────────
             if viz_save:
                 _cond_labels = (
-                    df_cells["condition"].values
-                    if "condition" in df_cells.columns
-                    else None
+                    df_cells["condition"].values if "condition" in df_cells.columns else None
                 )
 
                 self._enqueue_plot(
@@ -1284,9 +1241,7 @@ class FlowSOMPipeline:
                             compute_exclusive_clusters,
                         )
 
-                        _excl = compute_exclusive_clusters(
-                            metaclustering, _cond_labels, n_meta
-                        )
+                        _excl = compute_exclusive_clusters(metaclustering, _cond_labels, n_meta)
                         for _line in _excl.get("summary_lines", []):
                             _logger.info("%s", _line)
                     else:
@@ -1313,16 +1268,12 @@ class FlowSOMPipeline:
                         output_html=output_dir
                         / "plots"
                         / f"patho_pct_per_cluster_{timestamp}.html",
-                        output_jpg=output_dir
-                        / "plots"
-                        / f"patho_pct_per_cluster_{timestamp}.jpg"
+                        output_jpg=output_dir / "plots" / f"patho_pct_per_cluster_{timestamp}.jpg"
                         if _export_jpg
                         else None,
                     )
                 else:
-                    _logger.info(
-                        "Bar chart %% patho ignoré (condition_labels non disponible)."
-                    )
+                    _logger.info("Bar chart %% patho ignoré (condition_labels non disponible).")
 
                 self._enqueue_plot(
                     plot_worker,
@@ -1332,12 +1283,8 @@ class FlowSOMPipeline:
                     "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                     "plot_cells_pct_per_cluster",
                     metaclustering,
-                    output_html=output_dir
-                    / "plots"
-                    / f"cells_pct_per_cluster_{timestamp}.html",
-                    output_jpg=output_dir
-                    / "plots"
-                    / f"cells_pct_per_cluster_{timestamp}.jpg"
+                    output_html=output_dir / "plots" / f"cells_pct_per_cluster_{timestamp}.html",
+                    output_jpg=output_dir / "plots" / f"cells_pct_per_cluster_{timestamp}.jpg"
                     if _export_jpg
                     else None,
                     condition_labels=_cond_labels,
@@ -1357,16 +1304,12 @@ class FlowSOMPipeline:
                         output_html=output_dir
                         / "plots"
                         / f"patho_pct_per_som_node_{timestamp}.html",
-                        output_jpg=output_dir
-                        / "plots"
-                        / f"patho_pct_per_som_node_{timestamp}.jpg"
+                        output_jpg=output_dir / "plots" / f"patho_pct_per_som_node_{timestamp}.jpg"
                         if _export_jpg
                         else None,
                     )
                 else:
-                    _logger.info(
-                        "Bar chart %% patho SOM ignoré (condition_labels non disponible)."
-                    )
+                    _logger.info("Bar chart %% patho SOM ignoré (condition_labels non disponible).")
 
                 self._enqueue_plot(
                     plot_worker,
@@ -1376,12 +1319,8 @@ class FlowSOMPipeline:
                     "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                     "plot_cells_pct_per_som_node",
                     clustering,
-                    output_html=output_dir
-                    / "plots"
-                    / f"cells_pct_per_som_node_{timestamp}.html",
-                    output_jpg=output_dir
-                    / "plots"
-                    / f"cells_pct_per_som_node_{timestamp}.jpg"
+                    output_html=output_dir / "plots" / f"cells_pct_per_som_node_{timestamp}.html",
+                    output_jpg=output_dir / "plots" / f"cells_pct_per_som_node_{timestamp}.jpg"
                     if _export_jpg
                     else None,
                     condition_labels=_cond_labels,
@@ -1398,16 +1337,12 @@ class FlowSOMPipeline:
                         "plot_combined_som_node_html",
                         clustering,
                         _cond_labels,
-                        output_html=output_dir
-                        / "plots"
-                        / f"som_node_combined_{timestamp}.html",
+                        output_html=output_dir / "plots" / f"som_node_combined_{timestamp}.html",
                         X=X_stacked,
                         used_markers=list(mfi_matrix.columns),
                     )
                 else:
-                    _logger.info(
-                        "Vue combinée SOM ignorée (condition_labels non disponible)."
-                    )
+                    _logger.info("Vue combinée SOM ignorée (condition_labels non disponible).")
 
             # ── Étape 6: Exports ───────────────────────────────────────────────────
             _logger.info("Étape 6: Exports...")
@@ -1416,9 +1351,7 @@ class FlowSOMPipeline:
                 _monitor.mark_phase("Exports FCS / CSV / JSON")
             # name_stem pour les rapports : "rapport_<stem>" si fichier unique, sinon défaut
             _report_name_stem = (
-                f"rapport_{_patho_stem}"
-                if _patho_stem
-                else f"flowsom_report_{timestamp}"
+                f"rapport_{_patho_stem}" if _patho_stem else f"flowsom_report_{timestamp}"
             )
             exporter = ExportService(
                 config,
@@ -1441,14 +1374,9 @@ class FlowSOMPipeline:
             )
 
             # ── Étape 6b: Distribution Sain/Patho par cluster SOM ────────────
-            _cond_dist = (
-                df_cells["condition"].values
-                if "condition" in df_cells.columns
-                else None
-            )
+            _cond_dist = df_cells["condition"].values if "condition" in df_cells.columns else None
             _compact_mode = (
-                getattr(getattr(config, "export_mode", None), "mode", "standard")
-                == "compact"
+                getattr(getattr(config, "export_mode", None), "mode", "standard") == "compact"
             )
             if _cond_dist is not None and not _compact_mode:
                 try:
@@ -1463,9 +1391,7 @@ class FlowSOMPipeline:
                         len(dist_paths),
                     )
                 except Exception as _e:
-                    _logger.warning(
-                        "Export distribution clusters echoue (non bloquant): %s", _e
-                    )
+                    _logger.warning("Export distribution clusters echoue (non bloquant): %s", _e)
 
             # ── Sankey gating ─────────────────────────────────────────
             if viz_cfg is not None and viz_save:
@@ -1551,9 +1477,7 @@ class FlowSOMPipeline:
                         )
                         _logger.info("Étape 7: Mapping populations OK.")
                     else:
-                        _logger.warning(
-                            "Étape 7: FCS exporté introuvable — mapping ignoré."
-                        )
+                        _logger.warning("Étape 7: FCS exporté introuvable — mapping ignoré.")
 
                 except Exception as exc:
                     _logger.error("Étape 7 échouée (non bloquant): %s", exc)
@@ -1562,9 +1486,7 @@ class FlowSOMPipeline:
             if population_mapping_result is not None:
                 pop_figs = getattr(population_mapping_result, "figures_plotly", {})
                 if pop_figs:
-                    _plotly_figures.update(
-                        {k: v for k, v in pop_figs.items() if v is not None}
-                    )
+                    _plotly_figures.update({k: v for k, v in pop_figs.items() if v is not None})
 
             # ── Étape 8: Calcul MRD résiduelle ────────────────────────────────
             if _monitor:
@@ -1590,9 +1512,7 @@ class FlowSOMPipeline:
                     #   df_cells ne contient que des cellules CD45+ → mask all True
                     # Cas 2 — gate CD45 inactive :
                     #   reconstruction depuis la colonne CD45 de df_cells
-                    _cd45_autogating_mode = getattr(
-                        config.pregate, "cd45_autogating_mode", "none"
-                    )
+                    _cd45_autogating_mode = getattr(config.pregate, "cd45_autogating_mode", "none")
                     _pregate_cd45_active = getattr(config.pregate, "cd45", True)
                     _cd45_mask_mrd: Optional[np.ndarray] = None
 
@@ -1624,13 +1544,9 @@ class FlowSOMPipeline:
                             # est déjà CD45+), et on surcharge n_patho_cd45pos
                             # et n_patho_pre_cd45 après coup avec les valeurs exactes.
                             _cd45_mask_mrd = np.ones(len(df_cells), dtype=bool)
-                            _n_patho_cd45_override: Optional[int] = int(
-                                _n_patho_post_cd45
-                            )
+                            _n_patho_cd45_override: Optional[int] = int(_n_patho_post_cd45)
                             _n_patho_pre_override: Optional[int] = (
-                                int(_n_patho_pre_cd45)
-                                if _n_patho_pre_cd45 is not None
-                                else None
+                                int(_n_patho_pre_cd45) if _n_patho_pre_cd45 is not None else None
                             )
                             _logger.info(
                                 "n_patho_cd45pos (COMBINED G3 extras): %d CD45+ / %d total patho",
@@ -1658,9 +1574,7 @@ class FlowSOMPipeline:
                             None,
                         )
                         if _cd45_col is not None:
-                            _pct = getattr(
-                                config.pregate, "cd45_threshold_percentile", 5.0
-                            )
+                            _pct = getattr(config.pregate, "cd45_threshold_percentile", 5.0)
                             _cd45_vals = df_cells[_cd45_col].values
                             _thr = np.nanpercentile(_cd45_vals, _pct)
                             _cd45_mask_mrd = _cd45_vals >= _thr
@@ -1703,9 +1617,7 @@ class FlowSOMPipeline:
                                 and hasattr(_pm_result, "node_medians_norm")
                                 and _pm_result.node_medians_norm is not None
                             ):
-                                _x_norm_arr = np.asarray(
-                                    _pm_result.node_medians_norm, dtype=float
-                                )
+                                _x_norm_arr = np.asarray(_pm_result.node_medians_norm, dtype=float)
                                 _marker_names_list = list(
                                     getattr(
                                         _pm_result,
@@ -1726,8 +1638,7 @@ class FlowSOMPipeline:
                                 _node_medians_arr = node_mfi_matrix.values
 
                                 _sain_mask = (
-                                    df_cells["condition"].values
-                                    == mrd_cfg.condition_sain
+                                    df_cells["condition"].values == mrd_cfg.condition_sain
                                     if "condition" in df_cells.columns
                                     else None
                                 )
@@ -1735,9 +1646,7 @@ class FlowSOMPipeline:
                                     # Extraire les valeurs des marqueurs pour les
                                     # cellules saines (NBM) déjà transformées
                                     _cols_present = [
-                                        c
-                                        for c in _marker_names_list
-                                        if c in df_cells.columns
+                                        c for c in _marker_names_list if c in df_cells.columns
                                     ]
                                     if _cols_present:
                                         _X_sain = df_cells.loc[
@@ -1782,9 +1691,7 @@ class FlowSOMPipeline:
                                         "Porte biologique Mode 3 (dégradé) : "
                                         "pas assez de cellules Sain (%d) pour "
                                         "calculer les stats NBM — z-scoring intra-dataset.",
-                                        int(_sain_mask.sum())
-                                        if _sain_mask is not None
-                                        else 0,
+                                        int(_sain_mask.sum()) if _sain_mask is not None else 0,
                                     )
                         except Exception as _e:
                             _logger.warning(
@@ -1807,9 +1714,7 @@ class FlowSOMPipeline:
                         nbm_inv_cov=_nbm_inv_cov,
                         # Audit trail : chemins des fichiers YAML pour le hash SHA256
                         mrd_config_path=getattr(mrd_cfg, "_config_file_path", None),
-                        panel_config_path=getattr(
-                            config, "panel_config_path", None
-                        ),
+                        panel_config_path=getattr(config, "panel_config_path", None),
                     )
 
                     # Override n_patho_cd45pos et n_patho_pre_cd45 avec les valeurs
@@ -1849,9 +1754,7 @@ class FlowSOMPipeline:
                                 None,
                             )
                             if _cd45_col_name is not None:
-                                _cd45_data_mrd = df_cells[_cd45_col_name].values.astype(
-                                    np.float64
-                                )
+                                _cd45_data_mrd = df_cells[_cd45_col_name].values.astype(np.float64)
                                 # Masque CD45 : toutes les cellules de df_cells
                                 # sont CD45+ si gate CD45 était active
                                 _mask_cd45_mrd_plot = (
@@ -1876,15 +1779,11 @@ class FlowSOMPipeline:
                                     kde_seuil_relatif=getattr(
                                         config.pregate, "kde_cd45_seuil_relatif", 0.05
                                     ),
-                                    kde_finesse=getattr(
-                                        config.pregate, "kde_cd45_finesse", 0.6
-                                    ),
+                                    kde_finesse=getattr(config.pregate, "kde_cd45_finesse", 0.6),
                                     kde_sigma_smooth=getattr(
                                         config.pregate, "kde_cd45_sigma_smooth", 10
                                     ),
-                                    kde_n_grid=getattr(
-                                        config.pregate, "kde_cd45_n_grid", 1000
-                                    ),
+                                    kde_n_grid=getattr(config.pregate, "kde_cd45_n_grid", 1000),
                                     mrd_result=mrd_result,
                                 )
                                 if _fig_kde_cd45_mrd is not None:
@@ -1979,24 +1878,16 @@ class FlowSOMPipeline:
                             "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                             "plot_mrd_summary",
                             mrd_result,
-                            output_html=output_dir
-                            / "plots"
-                            / f"mrd_summary_{timestamp}.html",
-                            output_png=output_dir
-                            / "plots"
-                            / f"mrd_summary_{timestamp}.png"
+                            output_html=output_dir / "plots" / f"mrd_summary_{timestamp}.html",
+                            output_png=output_dir / "plots" / f"mrd_summary_{timestamp}.png"
                             if _export_png_mrd
                             else None,
                         )
 
                     # Radars MRD — un par méthode (JF et Flo)
                     if mrd_result is not None and viz_save:
-                        _jf_nodes = [
-                            n.cluster_id for n in mrd_result.per_node if n.is_mrd_jf
-                        ]
-                        _flo_nodes = [
-                            n.cluster_id for n in mrd_result.per_node if n.is_mrd_flo
-                        ]
+                        _jf_nodes = [n.cluster_id for n in mrd_result.per_node if n.is_mrd_jf]
+                        _flo_nodes = [n.cluster_id for n in mrd_result.per_node if n.is_mrd_flo]
                         self._enqueue_plot(
                             plot_worker,
                             "Radar MRD JF",
@@ -2008,9 +1899,7 @@ class FlowSOMPipeline:
                             clustering,
                             list(mfi_matrix.columns),
                             _jf_nodes,
-                            output_dir
-                            / "plots"
-                            / f"cluster_radar_mrd_jf_{timestamp}.html",
+                            output_dir / "plots" / f"cluster_radar_mrd_jf_{timestamp}.html",
                             title="Profils d'Expression — Clusters MRD",
                             method_label="JF",
                         )
@@ -2025,9 +1914,7 @@ class FlowSOMPipeline:
                             clustering,
                             list(mfi_matrix.columns),
                             _flo_nodes,
-                            output_dir
-                            / "plots"
-                            / f"cluster_radar_mrd_flo_{timestamp}.html",
+                            output_dir / "plots" / f"cluster_radar_mrd_flo_{timestamp}.html",
                             title="Profils d'Expression — Clusters MRD",
                             method_label="Flo",
                         )
@@ -2047,12 +1934,8 @@ class FlowSOMPipeline:
                             "flowsom_pipeline_pro.src.visualization.flowsom_plots",
                             "plot_blast_mrd_classification",
                             mrd_result,
-                            output_dir
-                            / "plots"
-                            / f"blast_mrd_classification_{timestamp}.html",
-                            output_dir
-                            / "plots"
-                            / f"blast_mrd_classification_{timestamp}.png"
+                            output_dir / "plots" / f"blast_mrd_classification_{timestamp}.html",
+                            output_dir / "plots" / f"blast_mrd_classification_{timestamp}.png"
                             if _export_png_blast
                             else None,
                         )
@@ -2064,9 +1947,7 @@ class FlowSOMPipeline:
 
                             mrd_json_path = output_dir / f"mrd_results_{timestamp}.json"
                             mrd_json_path.write_text(
-                                json.dumps(
-                                    mrd_result.to_dict(), indent=2, ensure_ascii=False
-                                ),
+                                json.dumps(mrd_result.to_dict(), indent=2, ensure_ascii=False),
                                 encoding="utf-8",
                             )
                             export_paths["mrd_results"] = str(mrd_json_path)
@@ -2134,9 +2015,7 @@ class FlowSOMPipeline:
                             "n_cells": int((metaclustering == mc).sum()),
                             "pct": round(float((metaclustering == mc).mean() * 100), 2),
                             "top_markers": ", ".join(
-                                mfi_matrix.loc[f"MC{int(mc)}"]
-                                .nlargest(3)
-                                .index.tolist()
+                                mfi_matrix.loc[f"MC{int(mc)}"].nlargest(3).index.tolist()
                             )
                             if f"MC{int(mc)}" in mfi_matrix.index
                             else "",
@@ -2161,11 +2040,7 @@ class FlowSOMPipeline:
                     # ── Données par fichier ────────────────────────────────
                     files_data: List[Dict] = []
                     file_col = next(
-                        (
-                            c
-                            for c in ("file_origin", "File_Origin")
-                            if c in df_cells.columns
-                        ),
+                        (c for c in ("file_origin", "File_Origin") if c in df_cells.columns),
                         None,
                     )
                     if file_col:
@@ -2239,9 +2114,7 @@ class FlowSOMPipeline:
                         files_data=files_data,
                         export_paths=export_paths,
                         patho_info=_patho_info,
-                        ransac_summary=dict(ransac_scatter_data)
-                        if ransac_scatter_data
-                        else None,
+                        ransac_summary=dict(ransac_scatter_data) if ransac_scatter_data else None,
                         prescreening_result=_prescreening_result,
                     )
                     if html_path:
@@ -2431,8 +2304,7 @@ class FlowSOMPipeline:
                     n_renamed += len(effective)
             if n_renamed:
                 _logger.info(
-                    "Renommage GUI : %d colonne(s) renommée(s) sur %d fichier(s) "
-                    "(mapping: %s)",
+                    "Renommage GUI : %d colonne(s) renommée(s) sur %d fichier(s) (mapping: %s)",
                     n_renamed,
                     len(samples),
                     col_rename_map,
@@ -2467,9 +2339,7 @@ class FlowSOMPipeline:
             node_sizes[cluster_ids.astype(int)] / max_size
         )
         r = np.sqrt(u) * radii
-        return (r * np.cos(theta)).astype(np.float32), (r * np.sin(theta)).astype(
-            np.float32
-        )
+        return (r * np.cos(theta)).astype(np.float32), (r * np.sin(theta)).astype(np.float32)
 
     def _build_fcs_dataframe(
         self,
@@ -2785,17 +2655,11 @@ class BatchPipeline:
                 row: Dict[str, object] = {
                     "Fichier FCS": stem,
                     "Date FCS": _fcs_date_str,
-                    "Statut": "OK"
-                    if (result is not None and result.success)
-                    else "ERREUR",
+                    "Statut": "OK" if (result is not None and result.success) else "ERREUR",
                 }
 
                 if result is None or not result.success:
-                    err = (
-                        result.warnings[0]
-                        if (result and result.warnings)
-                        else "Erreur inconnue"
-                    )
+                    err = result.warnings[0] if (result and result.warnings) else "Erreur inconnue"
                     row["Erreur"] = err
                     rows.append(row)
                     continue
@@ -2853,16 +2717,10 @@ class BatchPipeline:
                 ws = writer.sheets["Synthèse"]
                 for col in ws.columns:
                     max_len = max(
-                        (
-                            len(str(cell.value))
-                            for cell in col
-                            if cell.value is not None
-                        ),
+                        (len(str(cell.value)) for cell in col if cell.value is not None),
                         default=10,
                     )
-                    ws.column_dimensions[col[0].column_letter].width = min(
-                        max_len + 4, 40
-                    )
+                    ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
 
             _logger.info("Excel de synthèse: %s", excel_path)
             return str(excel_path)
