@@ -264,30 +264,13 @@ class FlowSOMClusterer:
         try:
             import anndata as ad
 
-            # Sous-échantillonnage SOM : le SOM est entraîné sur max _SOM_MAX_CELLS
-            # cellules stratifiées (par ordre aléatoire). Toutes les cellules reçoivent
-            # ensuite leur assignation BMU par lookup vectorisé sur le codebook.
-            # Impact biologique : négligeable au-dessus de 50k cellules (la grille SOM
-            # converge dès ~3× le nombre de nodes). Impact vitesse : 5–20× plus rapide.
-            _SOM_MAX_CELLS = 100_000
-            rng_som = np.random.default_rng(self.seed)
-            if n_cells > _SOM_MAX_CELLS:
-                _logger.info(
-                    "[FlowSOM] Sous-échantillonnage SOM: %d → %d cellules (entraînement)",
-                    n_cells, _SOM_MAX_CELLS,
-                )
-                _idx_som = rng_som.choice(n_cells, size=_SOM_MAX_CELLS, replace=False)
-                X_som = X[_idx_som]
-            else:
-                X_som = X
-
-            adata_som = ad.AnnData(X_som)
+            adata = ad.AnnData(X)
             if marker_names:
-                adata_som.var_names = marker_names[: X_som.shape[1]]
+                adata.var_names = marker_names[: X.shape[1]]
 
             self._fsom_model = fs.FlowSOM(
-                adata_som,
-                cols_to_use=list(range(X_som.shape[1])),
+                adata,
+                cols_to_use=list(range(X.shape[1])),
                 xdim=xdim,
                 ydim=ydim,
                 n_clusters=self.n_metaclusters,
@@ -331,40 +314,28 @@ class FlowSOMClusterer:
         except Exception as e:
             warnings.warn(f"Calcul layout MST GPU échoué: {e}")
 
-    def _bmu_lookup(self, X: np.ndarray) -> np.ndarray:
-        """
-        Assigne chaque cellule de X au node SOM le plus proche (BMU lookup).
-
-        Vectorisé en blocs de 10k lignes pour éviter de saturer la RAM avec
-        une matrice de distances (n_cells × n_nodes).
-
-        Returns:
-            Array int (n_cells,) — indice du node SOM le plus proche.
-        """
-        codebook = self._get_codebook()
-        if codebook is None:
-            return np.zeros(X.shape[0], dtype=int)
-
-        n_cells = X.shape[0]
-        assignments = np.empty(n_cells, dtype=np.intp)
-        block = 10_000
-        for start in range(0, n_cells, block):
-            end = min(start + block, n_cells)
-            # Distances euclidiennes au carré : (n_block, n_nodes)
-            diff = X[start:end, np.newaxis, :] - codebook[np.newaxis, :, :]
-            dists = np.einsum("ijk,ijk->ij", diff, diff)
-            assignments[start:end] = np.argmin(dists, axis=1)
-        return assignments
-
     def _extract_assignments_cpu(self, X: np.ndarray) -> None:
-        """Extrait les assignations depuis le modèle CPU (flowsom).
-
-        Si le SOM a été entraîné sur un sous-ensemble (sous-échantillonnage),
-        les assignations sont recalculées sur toutes les cellules de X via BMU lookup.
-        """
+        """Extrait les assignations depuis le modèle CPU (flowsom)."""
         try:
             fsom = self._fsom_model
-            n_cells_full = X.shape[0]
+            # fs.FlowSOM expose les données via get_cell_data() (AnnData)
+            cell_data = fsom.get_cell_data()
+
+            if "clustering" in cell_data.obs.columns:
+                self.node_assignments_ = cell_data.obs["clustering"].values.astype(int)
+            else:
+                self.node_assignments_ = np.zeros(X.shape[0], dtype=int)
+                warnings.warn(
+                    "Impossible d'extraire node_assignments depuis flowsom CPU"
+                )
+
+            if "metaclustering" in cell_data.obs.columns:
+                self.metacluster_assignments_ = cell_data.obs[
+                    "metaclustering"
+                ].values.astype(int)
+            else:
+                # Recalcul par AgglomerativeClustering sur le codebook
+                self._recompute_metaclusters()
 
             # Extraire le metacluster_map_ (node → metacluster) depuis cluster_data
             try:
@@ -375,55 +346,6 @@ class FlowSOMClusterer:
                     ].values.astype(int)
             except Exception as e:
                 _logger.debug("metacluster_map_ non extrait depuis cluster_data: %s", e)
-
-            # fs.FlowSOM expose les données via get_cell_data() (AnnData)
-            cell_data = fsom.get_cell_data()
-            n_cells_som = len(cell_data.obs)
-
-            if n_cells_som == n_cells_full:
-                # Pas de sous-échantillonnage — assignations directes
-                if "clustering" in cell_data.obs.columns:
-                    self.node_assignments_ = cell_data.obs["clustering"].values.astype(int)
-                else:
-                    self.node_assignments_ = np.zeros(n_cells_full, dtype=int)
-                    warnings.warn("Impossible d'extraire node_assignments depuis flowsom CPU")
-
-                if "metaclustering" in cell_data.obs.columns:
-                    self.metacluster_assignments_ = cell_data.obs[
-                        "metaclustering"
-                    ].values.astype(int)
-                else:
-                    self._recompute_metaclusters()
-            else:
-                # SOM entraîné sur sous-ensemble → BMU lookup sur toutes les cellules
-                _logger.info(
-                    "[FlowSOM] BMU lookup sur %d cellules (codebook %d nodes)...",
-                    n_cells_full, self.xdim * self.ydim,
-                )
-                self.node_assignments_ = self._bmu_lookup(X)
-
-                if self.metacluster_map_ is not None:
-                    self.metacluster_assignments_ = self.metacluster_map_[
-                        self.node_assignments_
-                    ]
-                elif "metaclustering" in cell_data.obs.columns:
-                    # Construire la map node→metacluster depuis le sous-ensemble
-                    som_node_asgn = cell_data.obs["clustering"].values.astype(int)
-                    som_meta_asgn = cell_data.obs["metaclustering"].values.astype(int)
-                    n_nodes = self.xdim * self.ydim
-                    meta_map = np.zeros(n_nodes, dtype=int)
-                    for node_i in range(n_nodes):
-                        mask = som_node_asgn == node_i
-                        if mask.any():
-                            meta_map[node_i] = int(np.bincount(som_meta_asgn[mask]).argmax())
-                    self.metacluster_map_ = meta_map
-                    self.metacluster_assignments_ = meta_map[self.node_assignments_]
-                else:
-                    self._recompute_metaclusters()
-                    if self.metacluster_map_ is not None:
-                        self.metacluster_assignments_ = self.metacluster_map_[
-                            self.node_assignments_
-                        ]
 
         except Exception as e:
             warnings.warn(f"Extraction assignations CPU échouée: {e}")
