@@ -146,6 +146,10 @@ class LogConsole(QPlainTextEdit):
         self._default_format = QTextCharFormat()
         self._default_format.setForeground(QBrush(QColor("#EEF2F7")))
 
+        # Cache de QTextCharFormat par couleur hex — évite des centaines
+        # d'allocations Python par tick lors de logs denses (50 msg × N spans).
+        self._fmt_cache: dict[str, QTextCharFormat] = {}
+
         # Nettoyage visuel des préfixes doublés: "[hh:mm:ss] INFO [hh:mm:ss] INFO ..."
         self._dup_prefix_re = re.compile(
             r"^(\[\d{2}:\d{2}:\d{2}\]\s+(?:INFO|WARNING|WARN|ERROR|ERR|DEBUG|SUCCESS)\s+)"
@@ -157,22 +161,40 @@ class LogConsole(QPlainTextEdit):
 
     def append_log(self, message: str) -> None:
         """
-        Ajoute une ligne de log avec coloration syntaxique automatique.
-        Scinde les spans par regex et insère chaque segment coloré.
+        Ajoute un message de log (ligne unique ou bloc multiligne) avec
+        coloration syntaxique automatique.
+
+        Pour les blocs volumineux, le repaint est suspendu temporairement
+        afin d'éviter un redessin à chaque ligne.
         """
+        if message is None:
+            return
+
+        text = str(message).replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.split("\n")
+
+        if not lines:
+            return
+
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
 
-        # Saut de ligne si le document n'est pas vide
-        if not self.document().isEmpty():
-            cursor.insertText("\n", self._default_format)
+        self.setUpdatesEnabled(False)
+        try:
+            for idx, raw_line in enumerate(lines):
+                # Saut de ligne entre lignes, et avant la première si document non vide
+                if not self.document().isEmpty() or idx > 0:
+                    cursor.insertText("\n", self._default_format)
 
-        line = self._normalize_line(message)
-        self._insert_colored(cursor, line)
+                line = self._normalize_line(raw_line)
+                self._insert_colored(cursor, line)
 
-        # Auto-scroll vers le bas
-        self.setTextCursor(cursor)
-        self.ensureCursorVisible()
+            # Auto-scroll vers le bas
+            self.setTextCursor(cursor)
+            self.ensureCursorVisible()
+        finally:
+            self.setUpdatesEnabled(True)
+            self.viewport().update()
 
     def append(self, text: str) -> None:
         """
@@ -189,6 +211,16 @@ class LogConsole(QPlainTextEdit):
         self.clear()
 
     # ── Coloration syntaxique ─────────────────────────────────────────
+
+    def _get_fmt(self, color: str) -> QTextCharFormat:
+        """Retourne un QTextCharFormat mis en cache par couleur hex."""
+        fmt = self._fmt_cache.get(color)
+        if fmt is None:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QBrush(QColor(color)))
+            fmt.setFont(self.font())
+            self._fmt_cache[color] = fmt
+        return fmt
 
     def _insert_colored(self, cursor: QTextCursor, line: str) -> None:
         """
@@ -233,11 +265,8 @@ class LogConsole(QPlainTextEdit):
             # Segment avant le match
             if pos < start:
                 cursor.insertText(line[pos:start], base_fmt)
-            # Segment coloré
-            fmt = QTextCharFormat()
-            fmt.setForeground(QBrush(QColor(color)))
-            fmt.setFont(self.font())
-            cursor.insertText(line[start:end], fmt)
+            # Segment coloré — format mis en cache pour éviter les allocations répétées
+            cursor.insertText(line[start:end], self._get_fmt(color))
             pos = end
 
         # Reste après le dernier match

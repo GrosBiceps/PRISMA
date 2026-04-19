@@ -6,10 +6,16 @@ Usage:
     pyinstaller flowsom_gui.spec  (production → .exe)
 """
 
-import sys
-import os
 import logging as _logging
+import multiprocessing
+import os
+import sys
 from pathlib import Path
+
+# freeze_support() doit être le tout premier appel en mode frozen pour intercepter
+# les sous-processus spawn déclenchés par Numba/joblib/UMAP avant tout import lourd.
+if getattr(sys, "frozen", False):
+    multiprocessing.freeze_support()
 
 
 def _enable_windows_crisp_rendering() -> None:
@@ -55,6 +61,64 @@ if getattr(sys, "frozen", False):
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
+
+
+def _install_crash_guard() -> None:
+    """
+    Installe sys.excepthook (thread principal) ET threading.excepthook (tous les
+    QThread/threads Python) pour intercepter toute exception non catchée et afficher
+    une boîte de dialogue Qt au lieu d'une mort silencieuse en mode frozen console=False.
+    Un fichier crash.log est écrit à côté du .exe pour diagnostic post-mortem.
+    """
+    import traceback as _tb
+    import threading as _threading
+
+    def _write_crash_log(msg: str) -> None:
+        try:
+            _log_path = Path(sys.executable).parent / "crash.log"
+            with open(_log_path, "a", encoding="utf-8") as _f:
+                _f.write(msg)
+        except Exception:
+            pass
+
+    def _show_crash_dialog(title: str, exc_type, exc_value, msg: str) -> None:
+        try:
+            from PyQt5.QtWidgets import QApplication, QMessageBox
+            app = QApplication.instance()
+            if app is not None:
+                box = QMessageBox()
+                box.setWindowTitle(title)
+                box.setIcon(QMessageBox.Critical)
+                box.setText(f"<b>{exc_type.__name__}</b>: {exc_value}")
+                box.setDetailedText(msg)
+                box.exec_()
+        except Exception:
+            pass
+
+    # ── Hook thread principal ──────────────────────────────────────────────────
+    def _main_excepthook(exc_type, exc_value, exc_traceback):
+        msg = "".join(_tb.format_exception(exc_type, exc_value, exc_traceback))
+        _write_crash_log(f"\n[Main thread crash]\n{msg}\n")
+        _show_crash_dialog("Erreur inattendue — PRISMA", exc_type, exc_value, msg)
+
+    sys.excepthook = _main_excepthook
+
+    # ── Hook tous les threads secondaires (QThread inclus) — Python ≥ 3.8 ─────
+    def _thread_excepthook(args) -> None:
+        msg = "".join(_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        thread_name = getattr(args.thread, "name", str(args.thread))
+        _write_crash_log(f"\n[Thread crash — {thread_name}]\n{msg}\n")
+        _show_crash_dialog(
+            f"Erreur dans un thread — PRISMA ({thread_name})",
+            args.exc_type,
+            args.exc_value,
+            msg,
+        )
+
+    _threading.excepthook = _thread_excepthook
+
+
+_install_crash_guard()
 
 # ── Résolution du chemin vers les dépendances dans le .exe ─────────────────────
 # En mode onedir, sys._MEIPASS = sous-dossier _internal à côté de l'exe.

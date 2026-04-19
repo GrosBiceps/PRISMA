@@ -19,6 +19,7 @@ Design :
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import shutil
 import sys
@@ -107,7 +108,7 @@ def _register_embedded_fonts() -> None:
         QFontDatabase.addApplicationFont(str(font_path))
 
 
-from flowsom_pipeline_pro.gui.workers import PipelineWorker, SpiderPlotWorker
+from flowsom_pipeline_pro.gui.workers import PipelineWorker, SpiderPlotWorker, FcsLoaderWorker
 from flowsom_pipeline_pro.gui.tabs.home_tab import HomeTab
 from flowsom_pipeline_pro.gui.widgets.log_console import LogConsole
 from flowsom_pipeline_pro.gui.widgets.toggle_switch import ToggleSwitch
@@ -184,7 +185,8 @@ class MatplotlibCanvas(FigureCanvas):
         self.fig.clear()
         self.axes = self.fig.add_subplot(111)
         self._style_axes(self.axes)
-        self.draw()
+        # Ne pas appeler self.draw() ici : le caller redessine immédiatement après,
+        # ce qui produirait deux rendus complets consécutifs pour un seul update.
 
     def display_figure(self, fig: Figure) -> None:
         import matplotlib.pyplot as plt
@@ -198,7 +200,14 @@ class MatplotlibCanvas(FigureCanvas):
         w_px, h_px = max(1, self.width()), max(1, self.height())
         self.fig.set_size_inches(w_px / dpi, h_px / dpi)
         self.draw()
-        plt.close(old_fig)
+        # Ne fermer l'ancienne figure que si elle est différente de la nouvelle
+        # et qu'elle n'est plus référencée par ce canvas, pour éviter
+        # RuntimeError: Figure is closed sur des figures partagées.
+        if old_fig is not None and old_fig is not fig:
+            try:
+                plt.close(old_fig)
+            except Exception:
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -252,10 +261,13 @@ class DropZoneLabel(QLabel):
         self.setObjectName("dropZoneOk")
         self.style().unpolish(self)
         self.style().polish(self)
-        # Notifier la fenêtre principale pour rafraîchir la prévisualisation FCS
+        # Notifier la fenêtre principale pour rafraîchir la prévisualisation FCS.
+        # QTimer.singleShot(0) remet la main à l'event loop avant le glob I/O,
+        # ce qui évite de geler l'UI pendant le drop sur un dossier réseau lent.
         mw = self._find_main_window()
         if mw and hasattr(mw, "_refresh_fcs_preview"):
-            mw._refresh_fcs_preview()
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, mw._refresh_fcs_preview)
 
     def _find_main_window(self) -> Optional[Any]:
         """Remonte la hiérarchie de parents pour trouver FlowSomAnalyzerPro."""
@@ -3109,7 +3121,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._worker.error.connect(self._on_pipeline_error)
             self._worker.start()
             # Démarre le drainage de la queue de logs depuis le thread principal
-            self._worker._log_capture.start_drain()
+            self._worker._log_capture.start_drain(parent=self)
             self.statusBar().showMessage(" Batch en cours d'exécution…")
         else:
             self._worker = PipelineWorker(self._config, parent=self)
@@ -3121,25 +3133,47 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._worker.error.connect(self._on_pipeline_error)
             self._worker.start()
             # Démarre le drainage de la queue de logs depuis le thread principal
-            self._worker._log_capture.start_drain()
+            self._worker._log_capture.start_drain(parent=self)
             self.statusBar().showMessage(" Pipeline en cours d'exécution…")
 
     def _stop_pipeline(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            reply = QMessageBox.question(
-                self,
-                "Confirmation",
-                "Voulez-vous interrompre le pipeline ?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply == QMessageBox.Yes:
-                self._worker.terminate()
-                self._worker.wait(3000)
-                self._log(" Pipeline interrompu par l'utilisateur")
-                self.btn_run_step3.setEnabled(True)
-                self.btn_stop.setEnabled(False)
-                self.statusBar().showMessage("Pipeline interrompu")
-                self._sidebar.set_error(3)
+        if self._worker is None or not self._worker.isRunning():
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirmation",
+            "Voulez-vous interrompre le pipeline ?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Stopper le timer de drainage avant de déconnecter les signaux
+        if hasattr(self._worker, "_log_capture") and self._worker._log_capture is not None:
+            self._worker._log_capture.stop_drain()
+
+        # Déconnecter les signaux pour éviter les callbacks après terminate()
+        for sig_name in ("log_message", "finished", "error", "progress",
+                         "gating_done", "prescreening_done",
+                         "file_started", "file_finished"):
+            sig = getattr(self._worker, sig_name, None)
+            if sig is not None:
+                try:
+                    sig.disconnect()
+                except Exception:
+                    pass
+
+        self._worker.terminate()
+        # 8 s — Numba JIT / UMAP / HDF5 peuvent mettre du temps à se terminer
+        if not self._worker.wait(8000):
+            self._log("[WARN] Le thread ne s'est pas arrêté dans les délais.")
+
+        self._log("Pipeline interrompu par l'utilisateur")
+        self.btn_run_step3.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.statusBar().showMessage("Pipeline interrompu")
+        self._sidebar.set_error(3)
 
     def _auto_load_patho_fcs(self, result: Any) -> None:
         """Charge automatiquement le FCS pathologique exporté dans le Viewer FCS."""
@@ -3221,11 +3255,11 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _on_log_message(self, msg: str) -> None:
         self.log_output.append(msg)
-        sb = self.log_output.verticalScrollBar()
-        sb.setValue(sb.maximum())
-        # Mise à jour de l'indicateur d'étape
+        # ensureCursorVisible() est déjà appelé dans LogConsole.append_log()
+        # — ne pas appeler setValue(maximum()) en plus (double scroll, pression layout inutile)
         if "Étape" in msg:
-            self.lbl_pipeline_step.setText(msg.strip())
+            step_line = next((line for line in reversed(msg.splitlines()) if "Étape" in line), msg)
+            self.lbl_pipeline_step.setText(step_line.strip())
 
     def _on_progress(self, value: int) -> None:
         self.progress_bar.setValue(value)
@@ -3899,6 +3933,8 @@ class FlowSomAnalyzerPro(QMainWindow):
             try:
                 import matplotlib.image as mpimg
 
+                # imread peut lire plusieurs dizaines de Mo — laisser Qt respirer avant
+                QApplication.processEvents()
                 self._combined_canvas.fig.clear()
                 ax = self._combined_canvas.fig.add_subplot(111)
                 ax.imshow(mpimg.imread(combined_png))
@@ -4779,8 +4815,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         return adata
 
     def _load_fcs_for_visualization(self, file_path: Optional[str] = None) -> None:
-        import numpy as np
-
+        """Lance le chargement FCS dans un thread dédié pour ne pas geler l'UI."""
         if file_path is None:
             dlg = QFileDialog(self, "Charger un fichier FCS")
             dlg.setFileMode(QFileDialog.ExistingFile)
@@ -4795,84 +4830,32 @@ class FlowSomAnalyzerPro(QMainWindow):
                 file_path = ""
         if not file_path:
             return
+
+        self._fcs_loading_path = file_path
+        self._log(f"Chargement FCS : {Path(file_path).name}")
+
+        # Désactiver les contrôles pendant le chargement
+        self.fcs_viz_canvas.setEnabled(False)
+        if hasattr(self, "btn_load_fcs_viz"):
+            self.btn_load_fcs_viz.setEnabled(False)
+
+        # Lancer le worker de chargement hors thread principal
+        self._fcs_loader = FcsLoaderWorker(file_path, parent=self)
+        self._fcs_loader.loaded.connect(self._on_fcs_loaded)
+        self._fcs_loader.error.connect(self._on_fcs_load_error)
+        self._fcs_loader.log.connect(self._log)
+        self._fcs_loader.start()
+
+    def _on_fcs_loaded(self, adata: Any) -> None:
+        """Slot appelé dans le thread principal quand FcsLoaderWorker a fini."""
+        file_path = getattr(self, "_fcs_loading_path", "")
+
+        # Réactiver les contrôles
+        self.fcs_viz_canvas.setEnabled(True)
+        if hasattr(self, "btn_load_fcs_viz"):
+            self.btn_load_fcs_viz.setEnabled(True)
+
         try:
-            self._log(f"Chargement FCS : {Path(file_path).name}")
-            adata = None
-            last_error: Optional[Exception] = None
-
-            try:
-                import flowsom as fs
-
-                adata = fs.io.read_FCS(file_path)
-                self._log("Chargé avec flowsom")
-            except Exception as e1:
-                self._log(f"flowsom échoué : {str(e1)[:60]}")
-                last_error = e1
-
-            if adata is None:
-                try:
-                    import flowio
-                    import anndata as ad
-
-                    fcs_data = flowio.FlowData(file_path)
-                    events = np.reshape(fcs_data.events, (-1, fcs_data.channel_count))
-                    n_ev, n_ch = events.shape
-                    if n_ev > 0 and n_ch > 0:
-                        ch_names: List[str] = []
-                        for i in range(1, n_ch + 1):
-                            name = None
-                            for key in (f"$P{i}N", f"P{i}N", f"$P{i}S", f"P{i}S"):
-                                if key in fcs_data.text:
-                                    name = fcs_data.text[key]
-                                    break
-                            ch_names.append(str(name) if name else f"Channel_{i}")
-                        adata = ad.AnnData(events.astype(np.float32))
-                        adata.var_names = ch_names
-                        self._log("Chargé avec flowio")
-                    else:
-                        raise ValueError(f"Fichier vide : {n_ev} events, {n_ch} canaux")
-                except ImportError:
-                    self._log("flowio non installé")
-                except Exception as e2:
-                    self._log(f"flowio échoué : {str(e2)[:60]}")
-                    last_error = e2
-
-            if adata is None:
-                try:
-                    import fcsparser
-                    import anndata as ad
-
-                    for naming in ("$PnS", "$PnN"):
-                        try:
-                            meta, data = fcsparser.parse(
-                                file_path,
-                                meta_data_only=False,
-                                reformat_meta=False,
-                                channel_naming=naming,
-                            )
-                            adata = ad.AnnData(data.values.astype(np.float32))
-                            adata.var_names = list(data.columns)
-                            self._log(f"Chargé avec fcsparser ({naming})")
-                            break
-                        except Exception:
-                            pass
-                except ImportError:
-                    self._log("fcsparser non installé")
-                except Exception as e3:
-                    self._log(f"fcsparser échoué : {str(e3)[:60]}")
-                    last_error = e3
-
-            if adata is None:
-                try:
-                    adata = self._read_fcs_binary(file_path)
-                    self._log("Chargé avec lecture binaire directe")
-                except Exception as e4:
-                    self._log(f"Binaire échoué : {str(e4)[:60]}")
-                    last_error = e4
-
-            if adata is None:
-                raise RuntimeError(f"Impossible de charger le FCS. Dernière erreur : {last_error}")
-
             real_names = self._extract_fcs_names(file_path, adata.shape[1])
             try:
                 adata.var_names = real_names
@@ -4892,7 +4875,6 @@ class FlowSomAnalyzerPro(QMainWindow):
             self.combo_fcs_color.clear()
             self.combo_fcs_color.addItem("Aucune")
 
-            # Colonnes classiques FlowSOM
             color_patterns = (
                 "flowsom_cluster",
                 "flowsom_metacluster",
@@ -4901,12 +4883,7 @@ class FlowSomAnalyzerPro(QMainWindow):
                 "metacluster",
                 "flowsom",
             )
-            # Colonnes d'annotation spéciales — traitement prioritaire avec palettes dédiées
-            # Inclut les variantes avec underscore ET avec espace (fcswrite compat_chn_names=True
-            # remplace _ par espace : "Is_MRD" → "Is MRD", "CD45_Status" → "CD45 Status", etc.)
-            # Format clé: nom normalisé (lowercase, underscores) → (label_display, clé_palette)
             _SPECIAL_COLS = {
-                # Is_MRD — variantes fcswrite
                 "is_mrd": ("Is_MRD", "__palette_is_mrd__"),
                 "ismrd": ("Is_MRD", "__palette_is_mrd__"),
                 "is mrd": ("Is_MRD", "__palette_is_mrd__"),
@@ -4914,24 +4891,19 @@ class FlowSomAnalyzerPro(QMainWindow):
                 "is_mrd_jf": ("Is_MRD", "__palette_is_mrd__"),
                 "is mrd flo": ("Is_MRD", "__palette_is_mrd__"),
                 "is mrd jf": ("Is_MRD", "__palette_is_mrd__"),
-                # CD45_Status — CD45+ / CD45dim / CD45-
                 "cd45_status": ("CD45_Status", "__palette_cd45__"),
                 "cd45 status": ("CD45_Status", "__palette_cd45__"),
                 "cd45status": ("CD45_Status", "__palette_cd45__"),
-                # CD34_Status — CD34+ / CD34-
                 "cd34_status": ("CD34_Status", "__palette_cd34__"),
                 "cd34 status": ("CD34_Status", "__palette_cd34__"),
                 "cd34status": ("CD34_Status", "__palette_cd34__"),
-                # Debris_Flag — Débris oui/non
                 "debris_flag": ("Debris_Flag", "__palette_debris__"),
                 "debris flag": ("Debris_Flag", "__palette_debris__"),
                 "debrisflag": ("Debris_Flag", "__palette_debris__"),
-                # Doublet_Flag — Doublets oui/non
                 "doublet_flag": ("Doublet_Flag", "__palette_doublet__"),
                 "doublet flag": ("Doublet_Flag", "__palette_doublet__"),
                 "doubletflag": ("Doublet_Flag", "__palette_doublet__"),
             }
-            # Labels d'affichage explicites dans le combo
             _SPECIAL_DISPLAY = {
                 "Is_MRD": "MRD+/MRD−  (Is_MRD)",
                 "CD45_Status": "CD45+ / CD45dim / CD45−",
@@ -4939,10 +4911,9 @@ class FlowSomAnalyzerPro(QMainWindow):
                 "Debris_Flag": "Débris oui/non",
                 "Doublet_Flag": "Doublets oui/non",
             }
-            _special_found: dict = {}  # label_interne → (col_name_réelle, palette_key)
+            _special_found: dict = {}
 
             for m in markers:
-                # Normaliser : lowercase + remplacer espaces par underscores pour lookup
                 ml = m.lower().replace(" ", "_")
                 if ml in _SPECIAL_COLS:
                     label, palette_key = _SPECIAL_COLS[ml]
@@ -4951,7 +4922,6 @@ class FlowSomAnalyzerPro(QMainWindow):
                 if any(p in m.lower() for p in color_patterns):
                     self.combo_fcs_color.addItem(m)
 
-            # Ajouter les colonnes spéciales avec leur palette encodée dans userData
             _auto_select_col: Optional[int] = None
             for label, (col_name, palette_key) in _special_found.items():
                 display = _SPECIAL_DISPLAY.get(label, label)
@@ -4959,7 +4929,6 @@ class FlowSomAnalyzerPro(QMainWindow):
                 if label == "Is_MRD":
                     _auto_select_col = self.combo_fcs_color.count() - 1
 
-            # Sélection automatique Is_MRD si présent, sinon CD45_Status
             if _auto_select_col is not None:
                 self.combo_fcs_color.setCurrentIndex(_auto_select_col)
             elif "CD45_Status" in _special_found:
@@ -4994,12 +4963,27 @@ class FlowSomAnalyzerPro(QMainWindow):
             QMessageBox.critical(self, "Erreur chargement FCS", str(e))
             self._log(f"Erreur chargement FCS : {e}")
 
+    def _on_fcs_load_error(self, msg: str) -> None:
+        """Slot appelé dans le thread principal si FcsLoaderWorker échoue."""
+        self.fcs_viz_canvas.setEnabled(True)
+        if hasattr(self, "btn_load_fcs_viz"):
+            self.btn_load_fcs_viz.setEnabled(True)
+        QMessageBox.critical(self, "Erreur chargement FCS", msg)
+        self._log(f"Erreur chargement FCS : {msg}")
+
     def _update_fcs_plot(self) -> None:
         if self.current_fcs_adata is None:
             return
         import numpy as np
         import matplotlib.pyplot as plt
         import matplotlib.colors as mcolors
+
+        # Limite absolue de sécurité — évite le gel de l'UI même en mode "tout afficher"
+        _MAX_SAFE_SCATTER = 200_000
+
+        # Désactiver le canvas le temps du rendu pour signaler visuellement le calcul
+        self.fcs_viz_canvas.setEnabled(False)
+        QApplication.processEvents()  # laisser Qt traiter les événements avant le calcul
 
         try:
             x_marker = self.combo_fcs_x.currentText()
@@ -5106,8 +5090,18 @@ class FlowSomAnalyzerPro(QMainWindow):
                 color_data = color_data[mask]
 
             n_total = len(x_data)
+            # Subsampling utilisateur
             if not show_all and n_total > max_cells:
                 idx = np.random.choice(n_total, int(max_cells), replace=False)
+                x_data = x_data[idx]
+                y_data = y_data[idx]
+                if color_data is not None:
+                    color_data = color_data[idx]
+                n_total = len(x_data)
+
+            # Limite de sécurité absolue — protège le thread principal même en mode "tout afficher"
+            if n_total > _MAX_SAFE_SCATTER:
+                idx = np.random.choice(n_total, _MAX_SAFE_SCATTER, replace=False)
                 x_data = x_data[idx]
                 y_data = y_data[idx]
                 if color_data is not None:
@@ -5348,6 +5342,10 @@ class FlowSomAnalyzerPro(QMainWindow):
         except Exception as e:
             self._log(f"Erreur plot FCS : {e}")
 
+        finally:
+            # Toujours réactiver le canvas, même en cas d'exception
+            self.fcs_viz_canvas.setEnabled(True)
+
     # ==================================================================
     # Persistance de session (P3.4)
     # ==================================================================
@@ -5485,7 +5483,38 @@ class FlowSomAnalyzerPro(QMainWindow):
     # ==================================================================
 
     def closeEvent(self, event: Any) -> None:  # type: ignore[override]
-        """Sauvegarde la session avant fermeture."""
+        """Arrêt propre du worker actif puis sauvegarde de session."""
+        if self._worker is not None and self._worker.isRunning():
+            reply = QMessageBox.question(
+                self,
+                "Pipeline actif",
+                "Un pipeline est en cours d'exécution.\nForcer la fermeture ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+
+            # Stopper le timer de drainage avant de déconnecter les signaux
+            if hasattr(self._worker, "_log_capture") and self._worker._log_capture is not None:
+                self._worker._log_capture.stop_drain()
+
+            # Déconnecter tous les signaux pour éviter les callbacks sur widget détruit
+            for sig_name in ("log_message", "finished", "error", "progress",
+                             "gating_done", "prescreening_done",
+                             "file_started", "file_finished"):
+                sig = getattr(self._worker, sig_name, None)
+                if sig is not None:
+                    try:
+                        sig.disconnect()
+                    except Exception:
+                        pass
+
+            self._worker.terminate()
+            if not self._worker.wait(8000):  # 8 s — Numba/UMAP peuvent être lents
+                self._worker.wait(0)  # forcer la sortie sans délai supplémentaire
+
         self._save_session()
         super().closeEvent(event)
 
@@ -5497,8 +5526,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         # log_output créé à l'étape 3 — protection au cas où appelé avant
         if hasattr(self, "log_output"):
             self.log_output.append(msg)
-            sb = self.log_output.verticalScrollBar()
-            sb.setValue(sb.maximum())
+            # ensureCursorVisible() déjà géré dans LogConsole.append_log()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5507,6 +5535,10 @@ class FlowSomAnalyzerPro(QMainWindow):
 
 
 def main() -> None:
+    # Required for Windows PyInstaller executables using multiprocessing
+    # (UMAP/Numba/joblib can trigger spawn semantics).
+    multiprocessing.freeze_support()
+
     # Apply before QApplication() so Qt renders in native DPI instead of bitmap scaling.
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

@@ -76,12 +76,25 @@ class LogCapture:
 
     def install(self) -> None:
         """Ajoute le handler au logger root. Appelé depuis le thread worker."""
-        # Ne pas forcer DEBUG sur le root — cela ouvre les vannes de tous les
-        # loggers tiers (numba, pynndescent…) et sature la queue.
-        if self._root_logger.level == logging.NOTSET:
-            self._root_logger.setLevel(logging.INFO)
+        # Forcer INFO sur le root — en mode frozen certaines libs imposent WARNING
+        # au démarrage, ce qui silencerait tous les messages INFO du pipeline.
+        self._root_logger.setLevel(logging.INFO)
         for name in self._NOISY_LOGGERS:
             logging.getLogger(name).setLevel(logging.WARNING)
+
+        # Retirer tous les StreamHandlers qui écrivent sur stdout/stderr
+        # (installés par logging.basicConfig ou les libs tierces) pour éviter
+        # les exceptions silencieuses sur streams None en mode frozen console=False.
+        import sys as _sys
+        dead_streams = {None, getattr(_sys, "__stdout__", None), getattr(_sys, "__stderr__", None)}
+        for h in list(self._root_logger.handlers):
+            if isinstance(h, logging.StreamHandler) and not isinstance(
+                h, logging.handlers.QueueHandler
+            ):
+                stream = getattr(h, "stream", None)
+                if stream is None or stream in dead_streams:
+                    self._root_logger.removeHandler(h)
+
         self._root_logger.addHandler(self._handler)
 
     def uninstall(self) -> None:
@@ -91,12 +104,16 @@ class LogCapture:
 
     # ── Drainage de la queue vers l'UI ────────────────────────────────────
 
-    def start_drain(self) -> None:
+    def start_drain(self, parent=None) -> None:
         """
         Démarre un QTimer dans le thread principal qui draine la queue toutes
         les 100 ms. Doit être appelé depuis le thread principal.
+
+        parent — QObject optionnel propriétaire du timer (évite les fuites
+                 mémoire et ancre le timer à la boucle d'événements Qt même
+                 en mode frozen console=False).
         """
-        self._timer = QTimer()
+        self._timer = QTimer(parent)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._drain_once)
         self._timer.start()
@@ -111,13 +128,18 @@ class LogCapture:
     def _drain_once(self) -> None:
         """Draine au plus 50 messages par tick pour ne pas bloquer l'UI."""
         q = self._handler._queue
+        batch: List[str] = []
         for _ in range(50):
             try:
                 record = q.get_nowait()
                 msg = self._handler.format(record)
-                self._log_signal.emit(msg)
+                batch.append(msg)
             except Exception:
                 break
+
+        if batch:
+            # Emit one payload per tick instead of one signal per line.
+            self._log_signal.emit("\n".join(batch))
 
 
 class PipelineWorker(QThread):
@@ -163,8 +185,11 @@ class PipelineWorker(QThread):
         # Installe le handler de log (thread-safe via QueueHandler)
         self._log_capture.install()
 
+        # Logger racine local pour passer par la queue (jamais d'emit direct cross-thread)
+        _log = logging.getLogger("flowsom_pipeline_pro.worker")
+
         try:
-            self.log_message.emit("═══ Démarrage du pipeline FlowSOM ═══")
+            _log.info("═══ Démarrage du pipeline FlowSOM ═══")
 
             pipeline = FlowSOMPipeline(self._config)
             _gating_emitted = False
@@ -229,36 +254,41 @@ class PipelineWorker(QThread):
             _ps = getattr(result, "prescreening_result", None) if result else None
             if _ps is not None:
                 try:
-                    self.prescreening_done.emit({
-                        "n_cd34_pos": int(_ps.n_cd34_pos),
-                        "n_cd34_neg": int(_ps.n_cd34_neg),
-                        "n_cd45dim": int(_ps.n_cd45dim),
-                        "ratio_pct": float(_ps.ratio_pct),
-                        "gmm_ratio_pct": float(_ps.gmm_ratio_pct),
-                        "kde_ratio_pct": float(_ps.kde_ratio_pct),
-                        "alert_level": str(_ps.alert_level),
-                        "alert_message": str(_ps.alert_message),
-                        "method_used": str(_ps.method_used),
-                        "laip_tracking_recommended": bool(_ps.laip_tracking_recommended),
-                        "interpretation_warning": str(_ps.interpretation_warning),
-                    })
+                    self.prescreening_done.emit(
+                        {
+                            "n_cd34_pos": int(_ps.n_cd34_pos),
+                            "n_cd34_neg": int(_ps.n_cd34_neg),
+                            "n_cd45dim": int(_ps.n_cd45dim),
+                            "ratio_pct": float(_ps.ratio_pct),
+                            "gmm_ratio_pct": float(_ps.gmm_ratio_pct),
+                            "kde_ratio_pct": float(_ps.kde_ratio_pct),
+                            "alert_level": str(_ps.alert_level),
+                            "alert_message": str(_ps.alert_message),
+                            "method_used": str(_ps.method_used),
+                            "laip_tracking_recommended": bool(_ps.laip_tracking_recommended),
+                            "interpretation_warning": str(_ps.interpretation_warning),
+                        }
+                    )
                 except Exception:
                     pass  # Non bloquant
 
             if result is not None and result.success:
-                self.log_message.emit(
-                    f"═══ Pipeline terminé — {result.n_cells:,} cellules, "
-                    f"{result.n_metaclusters} métaclusters ═══"
+                _log.info(
+                    "═══ Pipeline terminé — %s cellules, %s métaclusters ═══",
+                    f"{result.n_cells:,}",
+                    result.n_metaclusters,
                 )
             else:
-                self.log_message.emit("═══ Pipeline terminé avec des avertissements ═══")
+                _log.info("═══ Pipeline terminé avec des avertissements ═══")
 
             self.finished.emit(result)
 
         except Exception as exc:
             tb = traceback.format_exc()
-            self.log_message.emit(f"[ERREUR] {exc}")
-            self.log_message.emit(tb)
+            _log.error("[ERREUR] %s", exc)
+            _log.error("%s", tb)
+            # Flush queue avant d'émettre les signaux de fin
+            self._log_capture._drain_once()
             self.error.emit(str(exc))
             self.finished.emit(None)
 
@@ -301,8 +331,10 @@ class BatchWorker(QThread):
 
         self._log_capture.install()
 
+        _log = logging.getLogger("flowsom_pipeline_pro.batch_worker")
+
         try:
-            self.log_message.emit("═══ Démarrage du mode Batch ═══")
+            _log.info("═══ Démarrage du mode Batch ═══")
             self.progress.emit(2)
 
             batch = BatchPipeline(self._config)
@@ -311,13 +343,14 @@ class BatchWorker(QThread):
             self.progress.emit(100)
             n_ok = sum(1 for _, r in summary.get("results", []) if r is not None and r.success)
             n_total = len(summary.get("results", []))
-            self.log_message.emit(f"═══ Batch terminé — {n_ok}/{n_total} fichier(s) réussis ═══")
+            _log.info("═══ Batch terminé — %d/%d fichier(s) réussis ═══", n_ok, n_total)
             self.finished.emit(summary)
 
         except Exception as exc:
             tb = traceback.format_exc()
-            self.log_message.emit(f"[ERREUR BATCH] {exc}")
-            self.log_message.emit(tb)
+            _log.error("[ERREUR BATCH] %s", exc)
+            _log.error("%s", tb)
+            self._log_capture._drain_once()
             self.error.emit(str(exc))
             self.finished.emit(None)
 
@@ -408,3 +441,164 @@ class SpiderPlotWorker(QThread):
             self.figure_ready.emit(fig)
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class FcsLoaderWorker(QThread):
+    """
+    Charge un fichier FCS hors du thread principal pour éviter tout gel de l'UI.
+
+    Tente 4 backends dans l'ordre :
+      1. flowsom.io.read_FCS
+      2. flowio + anndata
+      3. fcsparser
+      4. lecture binaire brute (_read_fcs_binary du main_window)
+
+    Signaux :
+        loaded  — AnnData résultant (objet Python)
+        error   — message d'erreur (str) si tous les backends échouent
+        log     — messages de progression (str)
+    """
+
+    loaded = pyqtSignal(object)   # AnnData
+    error = pyqtSignal(str)
+    log = pyqtSignal(str)
+
+    def __init__(self, file_path: str, parent: Optional[Any] = None) -> None:
+        super().__init__(parent)
+        self._file_path = file_path
+
+    def run(self) -> None:
+        import numpy as np
+
+        fp = self._file_path
+        adata = None
+        last_error: Optional[Exception] = None
+
+        # ── Backend 1 : flowsom ───────────────────────────────────────────
+        try:
+            import flowsom as fs
+            adata = fs.io.read_FCS(fp)
+            self.log.emit("Chargé avec flowsom")
+        except Exception as e1:
+            self.log.emit(f"flowsom échoué : {str(e1)[:60]}")
+            last_error = e1
+
+        # ── Backend 2 : flowio + anndata ─────────────────────────────────
+        if adata is None:
+            try:
+                import flowio
+                import anndata as ad
+
+                fcs_data = flowio.FlowData(fp)
+                events = np.reshape(fcs_data.events, (-1, fcs_data.channel_count))
+                n_ev, n_ch = events.shape
+                if n_ev > 0 and n_ch > 0:
+                    ch_names: List[str] = []
+                    for i in range(1, n_ch + 1):
+                        name = None
+                        for key in (f"$P{i}N", f"P{i}N", f"$P{i}S", f"P{i}S"):
+                            if key in fcs_data.text:
+                                name = fcs_data.text[key]
+                                break
+                        ch_names.append(str(name) if name else f"Channel_{i}")
+                    adata = ad.AnnData(events.astype(np.float32))
+                    adata.var_names = ch_names
+                    self.log.emit("Chargé avec flowio")
+                else:
+                    raise ValueError(f"Fichier vide : {n_ev} events, {n_ch} canaux")
+            except ImportError:
+                self.log.emit("flowio non installé")
+            except Exception as e2:
+                self.log.emit(f"flowio échoué : {str(e2)[:60]}")
+                last_error = e2
+
+        # ── Backend 3 : fcsparser ─────────────────────────────────────────
+        if adata is None:
+            try:
+                import fcsparser
+                import anndata as ad
+
+                for naming in ("$PnS", "$PnN"):
+                    try:
+                        meta, data = fcsparser.parse(
+                            fp,
+                            meta_data_only=False,
+                            reformat_meta=False,
+                            channel_naming=naming,
+                        )
+                        adata = ad.AnnData(data.values.astype(np.float32))
+                        adata.var_names = list(data.columns)
+                        self.log.emit(f"Chargé avec fcsparser ({naming})")
+                        break
+                    except Exception:
+                        pass
+            except ImportError:
+                self.log.emit("fcsparser non installé")
+            except Exception as e3:
+                self.log.emit(f"fcsparser échoué : {str(e3)[:60]}")
+                last_error = e3
+
+        # ── Backend 4 : lecture binaire brute ────────────────────────────
+        if adata is None:
+            try:
+                adata = self._read_fcs_binary(fp)
+                self.log.emit("Chargé avec lecture binaire directe")
+            except Exception as e4:
+                self.log.emit(f"Binaire échoué : {str(e4)[:60]}")
+                last_error = e4
+
+        if adata is None:
+            self.error.emit(
+                f"Impossible de charger le FCS. Dernière erreur : {last_error}"
+            )
+            return
+
+        self.loaded.emit(adata)
+
+    def _read_fcs_binary(self, file_path: str):
+        """Lecture binaire FCS brute — fallback ultime."""
+        import struct
+        import numpy as np
+        import anndata as ad
+
+        with open(file_path, "rb") as f:
+            header = f.read(58)
+            if len(header) < 58:
+                raise ValueError("Fichier FCS trop court")
+            version = header[:6].decode("ascii", errors="replace").strip()
+            if not version.startswith("FCS"):
+                raise ValueError(f"Version FCS non reconnue : {version}")
+            text_start = int(header[10:18].strip())
+            text_end = int(header[18:26].strip())
+            data_start = int(header[26:34].strip())
+            data_end = int(header[34:42].strip())
+            f.seek(text_start)
+            text_raw = f.read(text_end - text_start + 1).decode("latin-1", errors="replace")
+        if not text_raw:
+            raise ValueError("Segment TEXT vide")
+        delim = text_raw[0]
+        parts = text_raw.split(delim)
+        kv: dict = {}
+        for i in range(1, len(parts) - 1, 2):
+            kv[parts[i].strip().upper()] = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        n_params = int(kv.get("$PAR", 0))
+        n_events = int(kv.get("$TOT", 0))
+        data_type = kv.get("$DATATYPE", "F").upper()
+        byte_order = kv.get("$BYTEORD", "1,2,3,4")
+        endian = "<" if byte_order.startswith("1") else ">"
+        fmt_char = {"F": "f", "D": "d", "I": "i"}.get(data_type, "f")
+        dtype = np.dtype(f"{endian}{fmt_char}")
+        with open(file_path, "rb") as f:
+            f.seek(data_start)
+            n_bytes = (data_end - data_start + 1) if data_end > data_start else (
+                n_events * n_params * dtype.itemsize
+            )
+            raw = f.read(n_bytes)
+        arr = np.frombuffer(raw, dtype=dtype).reshape(n_events, n_params).astype(np.float32)
+        channel_names = []
+        for i in range(1, n_params + 1):
+            name = kv.get(f"$P{i}N") or kv.get(f"$P{i}S") or f"Channel_{i}"
+            channel_names.append(name)
+        adata = ad.AnnData(arr)
+        adata.var_names = channel_names
+        return adata

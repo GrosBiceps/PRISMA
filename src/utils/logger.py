@@ -9,17 +9,45 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Configurer un logger Python standard pour les messages console/fichier
+def _safe_stream_handler() -> logging.Handler:
+    """
+    Retourne un StreamHandler toujours valide, y compris en mode
+    PyInstaller --noconsole (sys.stderr/sys.stdout peuvent être None).
+    En mode frozen console=False les deux streams sont None/devnull — on
+    retourne un NullHandler pour ne pas polluer le root logger avec un
+    StreamHandler mort qui bloquerait la propagation vers _QtLogHandler.
+    """
+    stream = sys.stderr if sys.stderr is not None else sys.stdout
+    if stream is None:
+        return logging.NullHandler()
+    # En mode frozen, os.devnull ouvert en écriture → NullHandler aussi
+    try:
+        name = getattr(stream, "name", "")
+        if name in (os.devnull, "/dev/null", "nul"):
+            return logging.NullHandler()
+    except Exception:
+        pass
+    return logging.StreamHandler(stream=stream)
+
+
+# Configurer un logger Python standard pour les messages console/fichier,
+# de manière robuste en environnement --noconsole.
+# force=True garantit que basicConfig s'applique même si une lib tierce
+# a déjà appelé basicConfig avant (ex: flowsom, scanpy au premier import).
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[_safe_stream_handler()],
+    force=True,
 )
 
 # Silencer les loggers DEBUG verbeux des bibliothèques tierces
@@ -214,8 +242,7 @@ class GatingLogger:
                 files_seen.append(e.file)
                 lines.append(f"\nFichier: {e.file}")
             lines.append(
-                f"  {e.gate_name:<20} {e.n_before:>8} → {e.n_after:>8} "
-                f"({e.pct_kept:5.1f}%)"
+                f"  {e.gate_name:<20} {e.n_before:>8} → {e.n_after:>8} ({e.pct_kept:5.1f}%)"
             )
             for w in e.warnings:
                 lines.append(f"    ⚠️  {w}")
