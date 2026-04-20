@@ -86,6 +86,7 @@ class LogCapture:
         # (installés par logging.basicConfig ou les libs tierces) pour éviter
         # les exceptions silencieuses sur streams None en mode frozen console=False.
         import sys as _sys
+
         dead_streams = {None, getattr(_sys, "__stdout__", None), getattr(_sys, "__stderr__", None)}
         for h in list(self._root_logger.handlers):
             if isinstance(h, logging.StreamHandler) and not isinstance(
@@ -209,7 +210,8 @@ class PipelineWorker(QThread):
                 _fs.FlowSOM(
                     _adata,
                     cols_to_use=list(range(4)),
-                    xdim=3, ydim=3,
+                    xdim=3,
+                    ydim=3,
                     n_clusters=2,
                     rlen=5,
                     seed=0,
@@ -427,65 +429,272 @@ class SpiderPlotWorker(QThread):
 
     def __init__(
         self,
-        mfi_row: Any,  # ndarray ou Series — profil MFI du cluster
+        mfi_row: Any,  # ndarray ou Series — profil MFI moyen total du cluster
         marker_names: list,  # subset des marqueurs à afficher
         cluster_label: str,  # libellé pour le titre (ex. "Cluster 42")
+        patho_row: Any = None,  # profil MFI pathologique du cluster (Series ou None)
+        nbm_row: Any = None,  # profil MFI NBM pour ce cluster (Series ou None)
+        nbm_mean_row: Any = None,  # profil MFI moyen global NBM (Series ou None)
+        canvas_width: int = 800,  # largeur cible du widget radar (px)
+        canvas_height: int = 400,  # hauteur cible du widget radar (px)
         parent: Optional[Any] = None,
     ) -> None:
         super().__init__(parent)
         self._mfi_row = mfi_row
         self._marker_names = marker_names
         self._cluster_label = cluster_label
+        self._patho_row = patho_row
+        self._nbm_row = nbm_row
+        self._nbm_mean_row = nbm_mean_row
+        self._canvas_width = max(1, int(canvas_width))
+        self._canvas_height = max(1, int(canvas_height))
 
     def run(self) -> None:
         try:
             import matplotlib.pyplot as plt
             import numpy as np
+            import pandas as pd
 
             markers = self._marker_names
             if not markers:
                 self.error.emit("Aucun marqueur sélectionné pour le Spider Plot.")
                 return
 
-            # Extrait les valeurs des marqueurs sélectionnés
-            import pandas as pd
+            def _extract(row) -> Optional[np.ndarray]:
+                if row is None:
+                    return None
+                if isinstance(row, pd.Series):
+                    return np.array([row.get(m, 0.0) for m in markers], dtype=float)
+                return np.asarray(row, dtype=float)[: len(markers)]
 
-            row = self._mfi_row
-            if isinstance(row, pd.Series):
-                values = np.array([row.get(m, 0.0) for m in markers], dtype=float)
-            else:
-                values = np.asarray(row, dtype=float)[: len(markers)]
+            total_vals = _extract(self._mfi_row)
+            patho_vals = _extract(self._patho_row)
+            nbm_vals = _extract(self._nbm_row)
+            nbm_mean = _extract(self._nbm_mean_row)
 
-            # Normalisation min-max
-            vmin, vmax = values.min(), values.max()
+            if patho_vals is None:
+                patho_vals = total_vals
+
+            # Normalisation min-max sur l'union de toutes les données disponibles
+            all_vals = [total_vals]
+            if patho_vals is not None:
+                all_vals.append(patho_vals)
+            if nbm_vals is not None:
+                all_vals.append(nbm_vals)
+            if nbm_mean is not None:
+                all_vals.append(nbm_mean)
+            combined = np.concatenate(all_vals)
+            vmin, vmax = combined.min(), combined.max()
             rng = vmax - vmin if vmax != vmin else 1.0
-            values_norm = (values - vmin) / rng
+
+            def _norm(v: np.ndarray) -> np.ndarray:
+                return (v - vmin) / rng
 
             n = len(markers)
             angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-            vals_plot = np.concatenate([values_norm, [values_norm[0]]])
-            angles_plot = angles + angles[:1]
 
-            fig, ax = plt.subplots(figsize=(6, 6), subplot_kw={"polar": True})
-            fig.patch.set_facecolor("#1e1e2e")
+            def _plot_series(
+                ax,
+                values: np.ndarray,
+                color: str,
+                label: str,
+                lw: float = 2.0,
+                alpha_line: float = 1.0,
+                alpha_fill: float = 0.28,
+                linestyle: str = "-",
+            ) -> None:
+                v = _norm(values)
+                v_plot = np.concatenate([v, [v[0]]])
+                a_plot = angles + angles[:1]
+                ax.plot(
+                    a_plot,
+                    v_plot,
+                    color=color,
+                    linewidth=lw,
+                    alpha=alpha_line,
+                    label=label,
+                    zorder=3,
+                    linestyle=linestyle,
+                    marker="o",
+                    markersize=4,
+                    markerfacecolor=color,
+                    markeredgewidth=0,
+                )
+                if alpha_fill > 0:
+                    ax.fill(a_plot, v_plot, color=color, alpha=alpha_fill, zorder=2)
+
+            from matplotlib.figure import Figure as _Figure
+
+            fig = _Figure(figsize=(6, 6), facecolor="#1e1e2e")
+            ax = fig.add_subplot(111, projection="polar")
             ax.set_facecolor("#1e1e2e")
 
-            ax.plot(angles_plot, vals_plot, "o-", color="#a6e3a1", linewidth=2)
-            ax.fill(angles_plot, vals_plot, alpha=0.25, color="#a6e3a1")
+            compact = (self._canvas_width < 760) or (self._canvas_height < 320)
+            marker_font = 7 if compact else 8
+            y_font = 6 if compact else 7
+            title_font = 9 if compact else 11
+            title_pad = 10 if compact else 20
+            tick_pad = 3 if compact else 6
+
+            # Violet (#c084fc) — Moyenne totale du cluster
+            _plot_series(
+                ax,
+                total_vals,
+                color="#c084fc",
+                label="Cluster total (moyenne)",
+                lw=2.2,
+                alpha_line=1.0,
+                alpha_fill=0.32,
+            )
+
+            # Orange (#FF9B3D) — Profil pathologique du cluster
+            if patho_vals is not None:
+                _plot_series(
+                    ax,
+                    patho_vals,
+                    color="#FF9B3D",
+                    label="Patho (cluster)",
+                    lw=2.0,
+                    alpha_line=0.98,
+                    alpha_fill=0.24,
+                )
+
+            # Bleu (#5BAAFF) — NBM du même cluster
+            if nbm_vals is not None:
+                _plot_series(
+                    ax,
+                    nbm_vals,
+                    color="#5BAAFF",
+                    label="NBM (cluster)",
+                    lw=1.8,
+                    alpha_line=0.95,
+                    alpha_fill=0.22,
+                )
+
+            # Vert (#39FF8A) — NBM moyen global de référence
+            if nbm_mean is not None:
+                _plot_series(
+                    ax,
+                    nbm_mean,
+                    color="#39FF8A",
+                    label="NBM moyen (réf.)",
+                    lw=1.6,
+                    alpha_line=0.95,
+                    alpha_fill=0.0,
+                    linestyle="--",
+                )
 
             ax.set_xticks(angles)
-            ax.set_xticklabels(markers, size=8, color="#cdd6f4")
-            ax.tick_params(axis="y", colors="#6c7086")
-            ax.spines["polar"].set_color("#45475a")
+            ax.set_xticklabels(markers, size=marker_font, color="#cdd6f4")
+            ax.tick_params(axis="y", colors="#9399b2", labelsize=y_font)
+            ax.tick_params(axis="x", pad=tick_pad, colors="#cdd6f4")
+            ax.spines["polar"].set_color("#585b70")
+            ax.yaxis.grid(True, color="#3a3a52", linewidth=0.7, linestyle=":")
+            ax.xaxis.grid(True, color="#45475a", linewidth=0.6)
             ax.set_ylim(0, 1)
+            ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+            ax.set_yticklabels(["0.25", "0.5", "0.75", "1.0"], size=6, color="#6c7086")
             ax.set_title(
                 self._cluster_label,
                 color="#cdd6f4",
-                fontsize=12,
+                fontsize=title_font,
                 fontweight="bold",
-                pad=20,
+                pad=title_pad,
             )
-            fig.tight_layout()
+
+            # Légende toujours affichée, avec description explicite des séries
+            legend_handles = []
+            from matplotlib.lines import Line2D
+
+            label_total = "Cluster total"
+            label_patho = "Patho"
+            label_nbm = "NBM cluster"
+            label_nbm_mean = "NBM moyen (réf.)"
+
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color="#c084fc",
+                    linewidth=2.2,
+                    marker="o",
+                    markersize=4,
+                    label=label_total,
+                )
+            )
+            if patho_vals is not None:
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color="#FF9B3D",
+                        linewidth=2.0,
+                        marker="o",
+                        markersize=4,
+                        label=label_patho,
+                    )
+                )
+            if nbm_vals is not None:
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color="#5BAAFF",
+                        linewidth=1.8,
+                        marker="o",
+                        markersize=4,
+                        label=label_nbm,
+                    )
+                )
+            if nbm_mean is not None:
+                legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color="#39FF8A",
+                        linewidth=1.5,
+                        marker="o",
+                        markersize=4,
+                        linestyle="--",
+                        label=label_nbm_mean,
+                    )
+                )
+
+            # Layout responsive : réserve une colonne de légende à gauche,
+            # puis recentre visuellement le radar pour éviter l'effet "décalé à droite".
+            if compact:
+                legend_col = min(0.28, max(0.19, 170.0 / float(self._canvas_width)))
+                ax_left = legend_col + 0.02
+                ax_right = 0.90
+                ax.set_position([ax_left, 0.12, max(0.46, ax_right - ax_left), 0.76])
+                lg_font = 6.8
+                lg_anchor = (0.02, 0.50)
+                lg_loc = "center left"
+                lg_handle = 1.3
+                lg_pad = 0.58
+            else:
+                legend_col = min(0.32, max(0.22, 210.0 / float(self._canvas_width)))
+                ax_left = legend_col + 0.02
+                ax_right = 0.92
+                ax.set_position([ax_left, 0.10, max(0.48, ax_right - ax_left), 0.80])
+                lg_font = 7.4
+                lg_anchor = (0.02, 0.50)
+                lg_loc = "center left"
+                lg_handle = 1.45
+                lg_pad = 0.78
+
+            fig.legend(
+                handles=legend_handles,
+                loc=lg_loc,
+                bbox_to_anchor=lg_anchor,
+                fontsize=lg_font,
+                framealpha=0.78,
+                facecolor="#1a1a2e",
+                edgecolor="#45475a",
+                labelcolor="#cdd6f4",
+                handlelength=lg_handle,
+                borderpad=lg_pad,
+            )
             self.figure_ready.emit(fig)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -507,7 +716,7 @@ class FcsLoaderWorker(QThread):
         log     — messages de progression (str)
     """
 
-    loaded = pyqtSignal(object)   # AnnData
+    loaded = pyqtSignal(object)  # AnnData
     error = pyqtSignal(str)
     log = pyqtSignal(str)
 
@@ -525,6 +734,7 @@ class FcsLoaderWorker(QThread):
         # ── Backend 1 : flowsom ───────────────────────────────────────────
         try:
             import flowsom as fs
+
             adata = fs.io.read_FCS(fp)
             self.log.emit("Chargé avec flowsom")
         except Exception as e1:
@@ -596,9 +806,7 @@ class FcsLoaderWorker(QThread):
                 last_error = e4
 
         if adata is None:
-            self.error.emit(
-                f"Impossible de charger le FCS. Dernière erreur : {last_error}"
-            )
+            self.error.emit(f"Impossible de charger le FCS. Dernière erreur : {last_error}")
             return
 
         self.loaded.emit(adata)
@@ -638,8 +846,10 @@ class FcsLoaderWorker(QThread):
         dtype = np.dtype(f"{endian}{fmt_char}")
         with open(file_path, "rb") as f:
             f.seek(data_start)
-            n_bytes = (data_end - data_start + 1) if data_end > data_start else (
-                n_events * n_params * dtype.itemsize
+            n_bytes = (
+                (data_end - data_start + 1)
+                if data_end > data_start
+                else (n_events * n_params * dtype.itemsize)
             )
             raw = f.read(n_bytes)
         arr = np.frombuffer(raw, dtype=dtype).reshape(n_events, n_params).astype(np.float32)

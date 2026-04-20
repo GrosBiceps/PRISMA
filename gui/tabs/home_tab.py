@@ -65,8 +65,9 @@ class HomeTab(QWidget):
     """
 
     curation_changed = pyqtSignal()
+    expert_focus_curation_applied = pyqtSignal(dict)
     verification_commit_requested = pyqtSignal(str)
-    open_html_requested = pyqtSignal()  # demande d'ouverture du rapport HTML
+    open_html_requested = pyqtSignal(str)  # str = "blast" | "radar" | "main"
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -328,6 +329,9 @@ class HomeTab(QWidget):
         self._node_table.combo_filter.currentIndexChanged.connect(self._on_node_filter_changed)
         self._node_table.curated_ratio_changed.connect(self._on_curated_ratio_changed)
         self._node_table.manually_added_nodes_changed.connect(self._on_manually_added_nodes_changed)
+        self._node_table.expert_focus_curation_applied.connect(
+            self._on_expert_focus_curation_applied
+        )
         self._node_table.verification_commit_requested.connect(
             self._on_verification_commit_requested
         )
@@ -378,10 +382,7 @@ class HomeTab(QWidget):
         layout.addWidget(lbl)
         layout.addStretch()
 
-        self.btn_eln_html = QPushButton("  Ouvrir Spider Plot HTML")
-        self.btn_eln_html.setFixedHeight(30)
-        self.btn_eln_html.setMinimumWidth(200)
-        self.btn_eln_html.setStyleSheet(f"""
+        _btn_style = """
             QPushButton {{
                 background: rgba(255,155,61,0.18);
                 color: #FF9B3D;
@@ -398,9 +399,21 @@ class HomeTab(QWidget):
             QPushButton:pressed {{
                 background: rgba(255,155,61,0.38);
             }}
-        """)
-        self.btn_eln_html.clicked.connect(self.open_html_requested)
+        """
+
+        self.btn_eln_html = QPushButton("  Classification Blast MRD")
+        self.btn_eln_html.setFixedHeight(30)
+        self.btn_eln_html.setMinimumWidth(210)
+        self.btn_eln_html.setStyleSheet(_btn_style)
+        self.btn_eln_html.clicked.connect(lambda: self.open_html_requested.emit("blast"))
         layout.addWidget(self.btn_eln_html)
+
+        self.btn_eln_radar = QPushButton("  Radar MRD Blastes")
+        self.btn_eln_radar.setFixedHeight(30)
+        self.btn_eln_radar.setMinimumWidth(180)
+        self.btn_eln_radar.setStyleSheet(_btn_style)
+        self.btn_eln_radar.clicked.connect(lambda: self.open_html_requested.emit("radar"))
+        layout.addWidget(self.btn_eln_radar)
         return bar
 
     def show_eln_html_bar(self, visible: bool) -> None:
@@ -888,6 +901,10 @@ class HomeTab(QWidget):
         """
         # Signale à MainWindow qu'une curation a eu lieu → patch HTML (déboucé)
         self._schedule_curation_changed()
+
+    def _on_expert_focus_curation_applied(self, payload: Dict[str, Any]) -> None:
+        """Relaye immédiatement la curation Expert Focus pour synchronisation externe."""
+        self.expert_focus_curation_applied.emit(payload)
 
     def _on_verification_commit_requested(self, filter_label: str) -> None:
         """Relaye la demande explicite de validation finale à MainWindow."""

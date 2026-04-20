@@ -1498,7 +1498,8 @@ class FlowSOMPipeline:
                     compute_mrd,
                 )
 
-                mrd_cfg = load_mrd_config()
+                _mrd_config_path = getattr(config, "_extra", {}).get("mrd_config_path") or None
+                mrd_cfg = load_mrd_config(_mrd_config_path)
 
                 if mrd_cfg.enabled and "condition" in df_cells.columns:
                     _logger.info("Étape 8: Calcul MRD résiduelle (nœuds SOM)...")

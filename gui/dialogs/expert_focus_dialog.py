@@ -414,8 +414,12 @@ class ExpertNodeCard(QFrame):
         ax = fig.add_subplot(111, polar=True)
         ax.set_facecolor("#0C1220")
 
-        ax.plot(angles, norm_values, color=radar_color, linewidth=1.6)
-        ax.fill(angles, norm_values, color=radar_color, alpha=0.18)
+        line_alpha = 0.45 if _empty_node else 1.0
+        fill_alpha = 0.12 if _empty_node else 0.30
+        ax.plot(angles, norm_values, color=radar_color, linewidth=1.8,
+                alpha=line_alpha, marker="o", markersize=2.5,
+                markerfacecolor=radar_color, markeredgewidth=0)
+        ax.fill(angles, norm_values, color=radar_color, alpha=fill_alpha)
 
         if _empty_node:
             ax.text(
@@ -440,9 +444,9 @@ class ExpertNodeCard(QFrame):
         )
         ax.set_yticklabels([])
         # Axes/spokes plus lisibles en fond sombre
-        ax.yaxis.grid(True, color=(1, 1, 1, 0.26), linewidth=0.7, linestyle=":")
-        ax.xaxis.grid(True, color=(1, 1, 1, 0.22), linewidth=0.6, linestyle="-")
-        ax.spines["polar"].set_color((1, 1, 1, 0.52))
+        ax.yaxis.grid(True, color=(1, 1, 1, 0.20), linewidth=0.7, linestyle=":")
+        ax.xaxis.grid(True, color=(1, 1, 1, 0.18), linewidth=0.6, linestyle="-")
+        ax.spines["polar"].set_color((1, 1, 1, 0.40))
         ax.spines["polar"].set_linewidth(0.9)
         ax.tick_params(axis="x", pad=3, colors="#EEF2F7")
         fig.tight_layout(pad=0.3)

@@ -302,12 +302,36 @@ class MRDNodeCard(QFrame):
         angles += angles[:1]
         norm_values = list(norm_values) + [norm_values[0]]
 
+        # Choisir la couleur selon le type de nœud (identique à ExpertNodeCard)
+        is_jf = bool(self._node.get("is_mrd_jf", False))
+        is_flo = bool(self._node.get("is_mrd_flo", False))
+        is_eln = bool(self._node.get("is_mrd_eln", False))
+        is_algo = is_jf or is_flo or is_eln
+        is_manual = bool(self._node.get("is_mrd_manual", False))
+
+        if is_algo:
+            radar_color = "#c084fc"  # Violet — nœud MRD algorithmique
+        elif is_manual:
+            radar_color = "#39FF8A"  # Vert — ajout manuel
+        else:
+            radar_color = "#5BAAFF"  # Bleu — nœud standard
+
         fig = Figure(figsize=(2.1, 2.1), facecolor="#080D18")
         ax = fig.add_subplot(111, polar=True)
         ax.set_facecolor("#0C1220")
 
-        ax.plot(angles, norm_values, color="#7B52FF", linewidth=1.6)
-        ax.fill(angles, norm_values, color="#7B52FF", alpha=0.18)
+        ax.plot(
+            angles,
+            norm_values,
+            color=radar_color,
+            linewidth=1.8,
+            alpha=1.0,
+            marker="o",
+            markersize=2.5,
+            markerfacecolor=radar_color,
+            markeredgewidth=0,
+        )
+        ax.fill(angles, norm_values, color=radar_color, alpha=0.30)
 
         ax.set_ylim(0, 1.05)
         ax.set_yticks([0.33, 0.66, 1.0])
@@ -319,8 +343,9 @@ class MRDNodeCard(QFrame):
             fontfamily=["Segoe UI", "Arial", "Arial", "sans-serif"],
         )
         ax.set_yticklabels([])
-        ax.yaxis.grid(True, color=(1, 1, 1, 0.10), linewidth=0.5, linestyle=":")
-        ax.spines["polar"].set_color((1, 1, 1, 0.08))
+        ax.yaxis.grid(True, color=(1, 1, 1, 0.18), linewidth=0.6, linestyle=":")
+        ax.xaxis.grid(True, color=(1, 1, 1, 0.12), linewidth=0.5)
+        ax.spines["polar"].set_color((1, 1, 1, 0.25))
         ax.tick_params(pad=3)
         fig.tight_layout(pad=0.3)
 
@@ -503,6 +528,7 @@ class MRDNodeTable(QWidget):
 
     curated_ratio_changed = pyqtSignal(str, float, int)
     manually_added_nodes_changed = pyqtSignal(list)
+    expert_focus_curation_applied = pyqtSignal(dict)
     verification_commit_requested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -815,6 +841,46 @@ class MRDNodeTable(QWidget):
         """
         return [n for n in self._nodes if self._included_by_id.get(int(n.get("node_id", 0)), True)]
 
+    def get_included_node_ids(self) -> set[int]:
+        """Retourne les node_id actuellement inclus (GARDER)."""
+        return {
+            int(n.get("node_id", 0))
+            for n in self._nodes
+            if self._included_by_id.get(int(n.get("node_id", 0)), True)
+        }
+
+    def apply_included_node_ids(self, included_ids: set[int], emit_ratio: bool = True) -> None:
+        """
+        Applique un état externe KEEP/DISCARD sur les nœuds suivis par la grille.
+
+        Args:
+            included_ids: Ensemble des node_id à marquer GARDER.
+            emit_ratio: Si True, émet curated_ratio_changed après application.
+        """
+        if not self._nodes:
+            return
+
+        norm_ids = {int(nid) for nid in included_ids}
+        for node in self._nodes:
+            nid = int(node.get("node_id", 0))
+            self._included_by_id[nid] = nid in norm_ids
+
+        self._rebuild_grid()
+        self._refresh_ratio_badge()
+
+        if emit_ratio:
+            total_mrd_cells = sum(
+                int(n.get("n_patho", 0))
+                for n in self._nodes
+                if self._included_by_id.get(int(n.get("node_id", 0)), True)
+            )
+            final_ratio = (
+                total_mrd_cells / self._total_viable_cells * 100.0
+                if self._total_viable_cells > 0
+                else 0.0
+            )
+            self.curated_ratio_changed.emit("Curated", final_ratio, total_mrd_cells)
+
     # ── Construction de la grille ────────────────────────────────────────────
 
     def _clear_grid(self) -> None:
@@ -1032,6 +1098,16 @@ class MRDNodeTable(QWidget):
             else 0.0
         )
         self.curated_ratio_changed.emit("Curated", final_ratio, total_mrd_cells)
+        self.expert_focus_curation_applied.emit(
+            {
+                "included_ids": sorted(included_ids),
+                "manual_ids": [
+                    int(nid)
+                    for nid in payload.get("manual_ids", [])
+                    if isinstance(nid, (int, float, str)) and str(nid).strip() != ""
+                ],
+            }
+        )
         self._rebuild_grid()
 
     def _on_manual_nodes_added(self, new_nodes: List[Dict[str, Any]]) -> None:
