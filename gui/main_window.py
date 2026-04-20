@@ -127,8 +127,25 @@ _WEBENGINE_ACTIVE = False
 
 # Chemin YAML
 if getattr(sys, "frozen", False):
-    _DEFAULT_CONFIG_PATH = Path(sys.executable).parent / "config" / "default_config.yaml"
-    _MRD_CONFIG_PATH = Path(sys.executable).parent / "config" / "mrd_config.yaml"
+    # Dans le .exe PyInstaller (onedir), les datas sont dans _internal/ = sys._MEIPASS.
+    # On préfère écrire dans exe_dir/config/ (writable) et lire depuis là aussi.
+    # Si le dossier n'existe pas encore, on le crée au premier démarrage.
+    _EXE_DIR = Path(sys.executable).parent
+    _MEIPASS_DIR = Path(getattr(sys, "_MEIPASS", str(_EXE_DIR / "_internal")))
+    _CONFIG_DIR = _EXE_DIR / "config"
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    _DEFAULT_CONFIG_PATH = _CONFIG_DIR / "default_config.yaml"
+    _MRD_CONFIG_PATH = _CONFIG_DIR / "mrd_config.yaml"
+
+    # Copier les configs depuis _internal si elles n'existent pas encore dans exe_dir/config/
+    for _cfg_name in ("default_config.yaml", "mrd_config.yaml"):
+        _src = _MEIPASS_DIR / "config" / _cfg_name
+        _dst = _CONFIG_DIR / _cfg_name
+        if not _dst.exists() and _src.exists():
+            import shutil as _shutil
+
+            _shutil.copy2(str(_src), str(_dst))
 else:
     _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"
     _MRD_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "mrd_config.yaml"
@@ -210,6 +227,187 @@ class MatplotlibCanvas(FigureCanvas):
                 pass
 
 
+def _robust_limits(
+    data: "Any",
+    quantile_lo: float = 0.005,
+    quantile_hi: float = 0.995,
+    margin: float = 0.04,
+) -> "tuple[float, float]":
+    """Renvoie (vmin, vmax) robustes aux outliers pour un axe matplotlib.
+
+    Écrête à quantile_lo / quantile_hi puis ajoute une marge proportionnelle.
+    Évite que quelques cellules aberrantes n'écrasent l'ensemble de l'affichage.
+    """
+    import numpy as _np
+
+    valid = data[_np.isfinite(data)]
+    if len(valid) == 0:
+        return 0.0, 1.0
+    lo = float(_np.quantile(valid, quantile_lo))
+    hi = float(_np.quantile(valid, quantile_hi))
+    if hi <= lo:
+        hi = lo + 1.0
+    span = hi - lo
+    return lo - margin * span, hi + margin * span
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ClusterItemDelegate — Pastille couleur + boutons ✓/✗ inline
+# ══════════════════════════════════════════════════════════════════════
+
+from PyQt5.QtWidgets import (
+    QStyledItemDelegate,
+    QStyleOptionButton,
+    QStyle,
+    QApplication as _QApplication,
+)
+from PyQt5.QtCore import QRect, QPoint, pyqtSignal as _pyqtSignal
+from PyQt5.QtGui import QPainter, QPen, QBrush as _QBrush
+
+_CL_COLOR_ROLE = Qt.UserRole + 1  # QColor de la pastille du cluster
+_CL_STATUS_ROLE = Qt.UserRole + 2  # "approved" | "rejected" | None
+_CL_MRD_ROLE = Qt.UserRole + 3  # tuple (is_jf, is_flo, is_eln) booléens
+
+
+class ClusterItemDelegate(QStyledItemDelegate):
+    """
+    Délégué personnalisé pour cluster_table (colonne 0).
+    Affiche :  [pastille couleur]  Cluster XX · MC2 · 15 %  [✓] [✗]
+    Émet approveClicked(row) / rejectClicked(row) sur clic de bouton.
+    """
+
+    approveClicked = _pyqtSignal(int)  # row
+    rejectClicked = _pyqtSignal(int)  # row
+
+    _BTN_W = 22
+    _BTN_H = 20
+    _DOT_R = 7  # rayon pastille
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+
+        status = index.data(_CL_STATUS_ROLE)
+        is_rejected = status == "rejected"
+        is_approved = status == "approved"
+
+        # Fond de ligne
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, QColor("#1e2d4a"))
+        elif is_rejected:
+            painter.fillRect(option.rect, QColor("#1a1010"))
+        else:
+            painter.fillRect(option.rect, QColor("#101825"))
+
+        r = option.rect
+        x, y, h = r.x() + 6, r.y(), r.height()
+        alpha = 80 if is_rejected else 255
+
+        # Pastille couleur du cluster
+        dot_color = index.data(_CL_COLOR_ROLE)
+        if isinstance(dot_color, QColor):
+            dot_color.setAlpha(alpha)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(dot_color)
+            painter.setRenderHint(QPainter.Antialiasing)
+            cx = x + self._DOT_R
+            cy = y + h // 2
+            painter.drawEllipse(QPoint(cx, cy), self._DOT_R, self._DOT_R)
+        x += self._DOT_R * 2 + 6
+
+        # Texte principal
+        text = index.data(Qt.DisplayRole) or ""
+        text_color = (
+            QColor("#555e6e")
+            if is_rejected
+            else (QColor("#39FF8A") if is_approved else QColor("#EEF2F7"))
+        )
+        painter.setPen(QPen(text_color))
+        font = painter.font()
+        font.setFamily("Segoe UI")
+        font.setPointSize(8)
+        painter.setFont(font)
+        btn_total = self._BTN_W * 2 + 4
+
+        # Badges MRD (JF / Flo / ELN) — dessinés à droite du texte
+        mrd_flags = index.data(_CL_MRD_ROLE)  # (is_jf, is_flo, is_eln) ou None
+        badge_w = 0
+        _BADGE_COLORS = [("#5BAAFF", "JF"), ("#39C5C5", "Flo"), ("#FF9B3D", "ELN")]
+        badge_font = painter.font()
+        badge_font.setPointSize(6)
+        badge_font.setBold(True)
+        if mrd_flags and any(mrd_flags):
+            badge_x = r.right() - btn_total - 4
+            for flag, (color_hex, label_text) in zip(reversed(mrd_flags), reversed(_BADGE_COLORS)):
+                if not flag:
+                    continue
+                painter.setFont(badge_font)
+                bw = painter.fontMetrics().horizontalAdvance(label_text) + 8
+                badge_x -= bw + 3
+                badge_rect = QRect(badge_x, r.y() + (r.height() - 14) // 2, bw, 14)
+                bc = QColor(color_hex)
+                bc.setAlpha(55 if is_rejected else 120)
+                painter.setBrush(bc)
+                painter.setPen(QPen(QColor(color_hex), 1))
+                painter.drawRoundedRect(badge_rect, 3, 3)
+                tc = QColor(color_hex)
+                tc.setAlpha(140 if is_rejected else 255)
+                painter.setPen(QPen(tc))
+                painter.drawText(badge_rect, Qt.AlignCenter, label_text)
+                badge_w += bw + 3
+        painter.setFont(font)
+
+        text_rect = QRect(x, r.y(), r.width() - btn_total - badge_w - x + r.x() - 12, r.height())
+        painter.setPen(QPen(text_color))
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+        # Bouton ✓
+        bx = r.right() - btn_total - 2
+        by = r.y() + (h - self._BTN_H) // 2
+        approve_rect = QRect(bx, by, self._BTN_W, self._BTN_H)
+        painter.setBrush(QColor("#1a3a24") if is_approved else QColor("#1a2a1a"))
+        painter.setPen(QPen(QColor("#39FF8A"), 1))
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.drawRect(approve_rect)
+        painter.setPen(QPen(QColor("#39FF8A") if not is_rejected else QColor("#334433")))
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(approve_rect, Qt.AlignCenter, "✓")
+
+        # Bouton ✗
+        reject_rect = QRect(bx + self._BTN_W + 2, by, self._BTN_W, self._BTN_H)
+        painter.setBrush(QColor("#3a1a1a") if is_rejected else QColor("#2a1a1a"))
+        painter.setPen(QPen(QColor("#FF3D6E"), 1))
+        painter.drawRect(reject_rect)
+        painter.setPen(QPen(QColor("#FF3D6E")))
+        painter.drawText(reject_rect, Qt.AlignCenter, "✗")
+
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(option.rect.width(), 30)
+
+    def editorEvent(self, event, model, option, index):
+        from PyQt5.QtCore import QEvent
+
+        if event.type() == QEvent.MouseButtonRelease:
+            r = option.rect
+            h = r.height()
+            btn_total = self._BTN_W * 2 + 4
+            bx = r.right() - btn_total - 2
+            by = r.y() + (h - self._BTN_H) // 2
+            pos = event.pos()
+            approve_rect = QRect(bx, by, self._BTN_W, self._BTN_H)
+            reject_rect = QRect(bx + self._BTN_W + 2, by, self._BTN_W, self._BTN_H)
+            if approve_rect.contains(pos):
+                self.approveClicked.emit(index.row())
+                return True
+            if reject_rect.contains(pos):
+                self.rejectClicked.emit(index.row())
+                return True
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Zone Drag & Drop (Étape 1)
 # ══════════════════════════════════════════════════════════════════════
@@ -267,6 +465,7 @@ class DropZoneLabel(QLabel):
         mw = self._find_main_window()
         if mw and hasattr(mw, "_refresh_fcs_preview"):
             from PyQt5.QtCore import QTimer
+
             QTimer.singleShot(0, mw._refresh_fcs_preview)
 
     def _find_main_window(self) -> Optional[Any]:
@@ -502,12 +701,16 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._worker: Optional[PipelineWorker] = None
         self._spider_worker: Optional[SpiderPlotWorker] = None
         self._cluster_mfi: Optional[Any] = None
+        self._cluster_mrd_flags: Dict[Any, tuple] = {}
+        self._expert_focus_included_ids: Optional[set[int]] = None
         self._all_markers: List[str] = []
         self._output_dir: Optional[Path] = None
         self._output_plot_paths: Dict[str, str] = {}
         self._gate_plot_paths: Dict[str, str] = {}
         self._combined_html_path: Optional[str] = None
         self.current_fcs_adata: Optional[Any] = None
+        self._full_fcs_adata: Optional[Any] = None   # FCS complet (toutes cellules) pour scatter clusters
+        self._full_fcs_loader: Optional[Any] = None  # worker de chargement FCS complet
         self._patho_fcs_path: Optional[str] = None  # FCS patho auto-chargé après pipeline
         self._pending_prescreening: Optional[Dict] = None
         self._per_file_rename_rules: Dict[str, List] = {}
@@ -1596,7 +1799,7 @@ class FlowSomAnalyzerPro(QMainWindow):
         if ico_rep:
             btn_report.setIcon(ico_rep)
             btn_report.setIconSize(QSize(16, 16))
-        btn_report.clicked.connect(self._open_html_report)
+        btn_report.clicked.connect(lambda: self._open_html_report("main"))
         abl.addWidget(btn_report)
 
         btn_folder = QPushButton("  Ouvrir dossier")
@@ -1663,8 +1866,11 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _build_home_tab(self) -> None:
         self._home_tab = HomeTab()
-        self._home_tab.open_html_requested.connect(self._open_html_report)
+        self._home_tab.open_html_requested.connect(
+            self._open_html_report
+        )  # str arg: "blast"|"radar"|"main"
         self._home_tab.curation_changed.connect(self._on_curation_changed)
+        self._home_tab.expert_focus_curation_applied.connect(self._on_expert_focus_curation_applied)
         self._home_tab.verification_commit_requested.connect(self._on_verification_commit_requested)
         _ico_home = _icon("prisma.dot-plot", "#39FF8A", 16)
         self.tabs.addTab(self._home_tab, _ico_home or QIcon(), "ACCUEIL MRD")
@@ -1816,53 +2022,230 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _build_clusters_tab(self) -> None:
         tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setContentsMargins(5, 5, 5, 5)
+        tab_root = QVBoxLayout(tab)
+        tab_root.setContentsMargins(5, 5, 5, 5)
+        tab_root.setSpacing(0)
 
-        left = QVBoxLayout()
-        left.setSpacing(6)
+        # ── Titre de l'onglet ────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        lbl_title = QLabel("Expert Focus View")
+        lbl_title.setObjectName("sectionLabel")
+        hdr.addWidget(lbl_title)
+        hdr.addStretch()
 
-        lbl_clusters = QLabel("Clusters (nœuds SOM)")
-        lbl_clusters.setObjectName("sectionLabel")
-        left.addWidget(lbl_clusters)
+        # Sélecteur méthode MRD pour pré-sélection automatique des clusters
+        lbl_mrd_method = QLabel("Sélection MRD :")
+        lbl_mrd_method.setStyleSheet(
+            "color: rgba(238,242,247,0.55); font-size: 8.5pt; background: transparent;"
+        )
+        hdr.addWidget(lbl_mrd_method)
+        self.combo_cluster_mrd_method = DarkComboBox()
+        self.combo_cluster_mrd_method.addItems(["Tout décocher", "JF", "Flo", "ELN"])
+        self.combo_cluster_mrd_method.setFixedHeight(28)
+        self.combo_cluster_mrd_method.setMinimumWidth(130)
+        self.combo_cluster_mrd_method.setToolTip(
+            "Pré-coche les clusters sélectionnés par la méthode MRD choisie.\n"
+            "'Tout décocher' laisse tous les clusters sans approbation."
+        )
+        self.combo_cluster_mrd_method.currentIndexChanged.connect(
+            self._on_cluster_mrd_method_changed
+        )
+        hdr.addWidget(self.combo_cluster_mrd_method)
 
-        self.cluster_list = QListWidget()
-        self.cluster_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.cluster_list.currentRowChanged.connect(self._on_cluster_selected)
-        self.cluster_list.setMaximumWidth(240)
-        left.addWidget(self.cluster_list, 2)
+        self._lbl_cluster_sync_badge = QLabel("Synchro active")
+        self._lbl_cluster_sync_badge.setStyleSheet(
+            "color: #39FF8A; background: rgba(57,255,138,0.12); "
+            "border: 1px solid rgba(57,255,138,0.35); border-radius: 0px; "
+            "padding: 3px 8px; font-size: 8pt; font-weight: 700;"
+        )
+        self._lbl_cluster_sync_badge.setToolTip(
+            "Validation nœuds MRD et onglet Clusters synchronisés en direct"
+        )
+        hdr.addWidget(self._lbl_cluster_sync_badge)
 
-        lbl_markers = QLabel("Marqueurs Spider Plot")
+        btn_approve_all = QPushButton("Tout approuver")
+        btn_approve_all.setObjectName("ghostBtn")
+        btn_approve_all.clicked.connect(lambda: self._set_all_cluster_status("approved"))
+        hdr.addWidget(btn_approve_all)
+        tab_root.addLayout(hdr)
+
+        # ── Splitter horizontal principal ────────────────────────────────
+        splitter_h = QSplitter(Qt.Horizontal)
+        splitter_h.setHandleWidth(6)
+        splitter_h.setStyleSheet("""
+            QSplitter::handle { background: rgba(123,82,255,0.18); border-radius: 3px; }
+            QSplitter::handle:hover { background: rgba(123,82,255,0.45); }
+        """)
+
+        # ═══════════════════════════════════════════════════════
+        # GAUCHE — Master View (liste + actions)
+        # ═══════════════════════════════════════════════════════
+        left_widget = QWidget()
+        left_widget.setMinimumWidth(280)
+        left = QVBoxLayout(left_widget)
+        left.setSpacing(5)
+        left.setContentsMargins(0, 4, 4, 0)
+
+        # Barre recherche + tri
+        filter_bar = QHBoxLayout()
+        self.edit_cluster_filter = QLineEdit()
+        self.edit_cluster_filter.setPlaceholderText("🔍  Rechercher cluster…")
+        self.edit_cluster_filter.setClearButtonEnabled(True)
+        self.edit_cluster_filter.textChanged.connect(self._filter_cluster_table)
+        filter_bar.addWidget(self.edit_cluster_filter, 2)
+
+        self.combo_cluster_sort = DarkComboBox()
+        self.combo_cluster_sort.addItems(
+            [
+                "Tri : Cluster ↑",
+                "Tri : Cluster ↓",
+                "Tri : Cellules ↓",
+                "Tri : % Patho ↓",
+                "Tri : Métacluster ↑",
+            ]
+        )
+        self.combo_cluster_sort.currentIndexChanged.connect(self._sort_cluster_table)
+        filter_bar.addWidget(self.combo_cluster_sort, 1)
+        left.addLayout(filter_bar)
+
+        # Tableau clusters — colonne unique avec delegate custom
+        self.cluster_table = QTableWidget()
+        self.cluster_table.setColumnCount(1)
+        self.cluster_table.horizontalHeader().setVisible(False)
+        self.cluster_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.cluster_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.cluster_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.cluster_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.cluster_table.setAlternatingRowColors(False)
+        self.cluster_table.verticalHeader().setVisible(False)
+        self.cluster_table.setShowGrid(False)
+        self.cluster_table.setFocusPolicy(Qt.StrongFocus)
+        self.cluster_table.verticalHeader().setDefaultSectionSize(30)
+        self.cluster_table.currentCellChanged.connect(
+            lambda row, *_: self._on_cluster_table_selected(row)
+        )
+
+        # Attacher le delegate personnalisé
+        self._cluster_delegate = ClusterItemDelegate(self.cluster_table)
+        self.cluster_table.setItemDelegateForColumn(0, self._cluster_delegate)
+        self._cluster_delegate.approveClicked.connect(
+            lambda row: self._set_cluster_status_row(row, "approved")
+        )
+        self._cluster_delegate.rejectClicked.connect(
+            lambda row: self._set_cluster_status_row(row, "rejected")
+        )
+        left.addWidget(self.cluster_table, 3)
+
+        # Boutons approbation globaux (fallback clavier)
+        approve_bar = QHBoxLayout()
+        btn_approve = QPushButton("✓  GARDER")
+        btn_approve.setObjectName("successBtn")
+        btn_approve.clicked.connect(lambda: self._set_cluster_status("approved"))
+        approve_bar.addWidget(btn_approve)
+        btn_reject = QPushButton("✗  ÉCARTER")
+        btn_reject.setObjectName("dangerBtn")
+        btn_reject.clicked.connect(lambda: self._set_cluster_status("rejected"))
+        approve_bar.addWidget(btn_reject)
+        left.addLayout(approve_bar)
+
+        # Sélecteur marqueurs spider
+        lbl_markers = QLabel("Marqueurs Radar")
         lbl_markers.setObjectName("subtitleLabel")
         left.addWidget(lbl_markers)
 
         self.marker_list = QListWidget()
         self.marker_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.marker_list.setMaximumWidth(240)
-        left.addWidget(self.marker_list, 2)
+        self.marker_list.itemSelectionChanged.connect(self._on_marker_selection_changed)
+        left.addWidget(self.marker_list, 1)
 
-        btn_all_markers = QPushButton("Tout sélectionner")
+        msel_bar = QHBoxLayout()
+        btn_all_markers = QPushButton("Tout sél.")
         btn_all_markers.clicked.connect(lambda: self.marker_list.selectAll())
-        left.addWidget(btn_all_markers)
-
-        btn_clear_markers = QPushButton("Tout désélectionner")
+        msel_bar.addWidget(btn_all_markers)
+        btn_clear_markers = QPushButton("Désél.")
         btn_clear_markers.clicked.connect(lambda: self.marker_list.clearSelection())
-        left.addWidget(btn_clear_markers)
+        msel_bar.addWidget(btn_clear_markers)
+        left.addLayout(msel_bar)
 
-        btn_spider = QPushButton("  Générer Spider Plot")
-        btn_spider.setObjectName("primaryBtn")
-        ico_sp = _icon("prisma.metacluster", "#11111b", 16)
-        if ico_sp:
-            btn_spider.setIcon(ico_sp)
-            btn_spider.setIconSize(QSize(16, 16))
-        btn_spider.clicked.connect(self._generate_spider_plot)
-        left.addWidget(btn_spider)
+        splitter_h.addWidget(left_widget)
 
-        layout.addLayout(left)
-        self.star_canvas = MatplotlibCanvas(tab, width=7, height=7)
-        layout.addWidget(self.star_canvas, 1)
+        # ═══════════════════════════════════════════════════════
+        # DROITE — Detail View (scatter + radar)
+        # ═══════════════════════════════════════════════════════
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setSpacing(5)
+        right.setContentsMargins(4, 4, 0, 0)
+
+        # Barre axes du focus scatter
+        axes_bar = QHBoxLayout()
+        axes_bar.addWidget(QLabel("X:"))
+        self.combo_focus_x = DarkComboBox()
+        self.combo_focus_x.setMinimumWidth(110)
+        self.combo_focus_x.currentIndexChanged.connect(self._update_focus_plot)
+        axes_bar.addWidget(self.combo_focus_x)
+        axes_bar.addWidget(QLabel("Y:"))
+        self.combo_focus_y = DarkComboBox()
+        self.combo_focus_y.setMinimumWidth(110)
+        self.combo_focus_y.currentIndexChanged.connect(self._update_focus_plot)
+        axes_bar.addWidget(self.combo_focus_y)
+        axes_bar.addStretch()
+        btn_reset_focus = QPushButton("⟳  Reset Vue")
+        btn_reset_focus.setObjectName("ghostBtn")
+        btn_reset_focus.setToolTip("Réinitialise le zoom (fit-to-screen)")
+        btn_reset_focus.clicked.connect(self._reset_focus_view)
+        axes_bar.addWidget(btn_reset_focus)
+        right.addLayout(axes_bar)
+
+        # Splitter vertical : représentation globale (haut) + radar (bas)
+        splitter_v = QSplitter(Qt.Vertical)
+        splitter_v.setHandleWidth(6)
+        splitter_v.setStyleSheet("""
+            QSplitter::handle { background: rgba(91,170,255,0.18); border-radius: 3px; }
+            QSplitter::handle:hover { background: rgba(91,170,255,0.45); }
+        """)
+
+        # ── Représentation globale (Scatter, en haut) ─────────────────────
+        scatter_container = QWidget()
+        scatter_layout = QVBoxLayout(scatter_container)
+        scatter_layout.setContentsMargins(0, 0, 0, 0)
+        scatter_layout.setSpacing(2)
+
+        self._lbl_scatter_axis_info = QLabel(
+            "ℹ  Intensités brutes (linéaires) — même échelle que l'onglet Viewer FCS"
+        )
+        self._lbl_scatter_axis_info.setStyleSheet(
+            "color: rgba(238,242,247,0.45); font-size: 7.5pt; "
+            "background: rgba(10,15,28,0.75); "
+            "border-bottom: 1px solid rgba(91,170,255,0.18); "
+            "padding: 3px 8px;"
+        )
+        scatter_layout.addWidget(self._lbl_scatter_axis_info)
+
+        self.focus_canvas = MatplotlibCanvas(scatter_container, width=8, height=5)
+        self.focus_canvas.setMinimumHeight(220)
+        scatter_layout.addWidget(self.focus_canvas, 1)
+
+        # ── Radar Plot (en haut) ────────────────────────────────────────
+        self.star_canvas = MatplotlibCanvas(right_widget, width=8, height=4)
+        self.star_canvas.setMinimumHeight(200)
+        splitter_v.addWidget(self.star_canvas)
+
+        splitter_v.addWidget(scatter_container)
+
+        splitter_v.setSizes([300, 420])
+        right.addWidget(splitter_v, 1)
+        splitter_h.addWidget(right_widget)
+
+        splitter_h.setSizes([320, 780])
+        tab_root.addWidget(splitter_h, 1)
+
         _ico_clust = _icon("prisma.metacluster", "#FF9B3D", 16)
         self.tabs.addTab(tab, _ico_clust or QIcon(), "CLUSTERS")
+
+        # État d'approbation : {cluster_id -> "approved" | "rejected" | None}
+        self._cluster_status: dict = {}
+        self.cluster_list = self.cluster_table  # type: ignore[assignment]
 
     def _build_results_tab(self) -> None:
         tab = QWidget()
@@ -2036,6 +2419,18 @@ class FlowSomAnalyzerPro(QMainWindow):
             btn_refresh.setIconSize(QSize(16, 16))
         btn_refresh.clicked.connect(self._update_fcs_plot)
         ctrl_layout.addWidget(btn_refresh)
+
+        btn_reset_view = QPushButton("  Reset Vue")
+        btn_reset_view.setObjectName("ghostBtn")
+        btn_reset_view.setToolTip(
+            "Réinitialise le zoom pour embrasser toute la population (fit-to-screen robuste)"
+        )
+        ico_reset = _icon("prisma.sync", "#FFE032")
+        if ico_reset:
+            btn_reset_view.setIcon(ico_reset)
+            btn_reset_view.setIconSize(QSize(16, 16))
+        btn_reset_view.clicked.connect(self._reset_fcs_view)
+        ctrl_layout.addWidget(btn_reset_view)
 
         ctrl_layout.addStretch()
         layout.addWidget(ctrl)
@@ -2294,6 +2689,9 @@ class FlowSomAnalyzerPro(QMainWindow):
             c._extra.pop("column_rename_map", None)
 
         self._sync_ui_to_mrd_config()
+        # Transmettre le chemin du fichier MRD au pipeline executor
+        # (évite la divergence entre le fichier écrit par la GUI et celui lu par le pipeline)
+        c._extra["mrd_config_path"] = str(_MRD_CONFIG_PATH)
 
     def _sync_mrd_config_to_ui(self) -> None:
         mrd = getattr(self, "_mrd_raw", {}) or {}
@@ -3154,9 +3552,16 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._worker._log_capture.stop_drain()
 
         # Déconnecter les signaux pour éviter les callbacks après terminate()
-        for sig_name in ("log_message", "finished", "error", "progress",
-                         "gating_done", "prescreening_done",
-                         "file_started", "file_finished"):
+        for sig_name in (
+            "log_message",
+            "finished",
+            "error",
+            "progress",
+            "gating_done",
+            "prescreening_done",
+            "file_started",
+            "file_finished",
+        ):
             sig = getattr(self._worker, sig_name, None)
             if sig is not None:
                 try:
@@ -3188,6 +3593,45 @@ class FlowSomAnalyzerPro(QMainWindow):
                 self._load_fcs_for_visualization(file_path=patho_fcs)
         except Exception as e:
             self._log(f"[Viewer FCS] Auto-chargement ignoré : {e}")
+
+    def _auto_load_full_fcs(self, result: Any) -> None:
+        """Charge le FCS complet exporté en arrière-plan pour le scatter de l'onglet Clusters."""
+        try:
+            full_fcs = self._resolve_full_fcs_path(result)
+            if not full_fcs:
+                return
+            self._log(f"[Clusters scatter] Chargement FCS complet : {Path(full_fcs).name}")
+            if self._full_fcs_loader is not None and self._full_fcs_loader.isRunning():
+                self._full_fcs_loader.terminate()
+                self._full_fcs_loader.wait(200)
+            self._full_fcs_loader = FcsLoaderWorker(full_fcs, parent=self)
+            self._full_fcs_loader.loaded.connect(self._on_full_fcs_loaded)
+            self._full_fcs_loader.error.connect(
+                lambda msg: self._log(f"[Clusters scatter] Erreur chargement FCS complet : {msg}")
+            )
+            self._full_fcs_loader.start()
+        except Exception as e:
+            self._log(f"[Clusters scatter] Auto-chargement FCS complet ignoré : {e}")
+
+    def _on_full_fcs_loaded(self, adata: Any) -> None:
+        """Slot : FCS complet chargé → stocké dans _full_fcs_adata pour le scatter clusters."""
+        try:
+            full_fcs = self._resolve_full_fcs_path()
+            real_names = self._extract_fcs_names(full_fcs, adata.shape[1]) if full_fcs else None
+            if real_names:
+                try:
+                    adata.var_names = real_names
+                except Exception:
+                    pass
+            self._full_fcs_adata = adata
+            self._log(
+                f"[Clusters scatter] FCS complet chargé — {adata.shape[0]:,} cellules, "
+                f"{adata.shape[1]} canaux"
+            )
+            # Redessiner si un cluster est déjà sélectionné
+            self._update_focus_plot()
+        except Exception as e:
+            self._log(f"[Clusters scatter] Erreur post-chargement FCS complet : {e}")
 
     def _resolve_patho_fcs_path(self, result: Any = None) -> str:
         """Résout le chemin du FCS pathologique MRD avec fallback robuste."""
@@ -3394,6 +3838,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             )
             self._populate_results(result)
             self._populate_cluster_list(result)
+            self._populate_cluster_table(result)
             self._populate_pregate_tab(result)
             self._load_output_plots(result)
             method_used = self.combo_mrd_method.currentText()
@@ -3420,6 +3865,8 @@ class FlowSomAnalyzerPro(QMainWindow):
             self.tabs.setCurrentIndex(0)
             # Charger automatiquement le FCS patho dans le Viewer FCS
             self._auto_load_patho_fcs(result)
+            # Charger le FCS complet en arrière-plan pour le scatter de l'onglet Clusters
+            self._auto_load_full_fcs(result)
             # Afficher le popup pré-screening APRÈS le chargement de HomeTab
             self._show_pending_prescreening()
         else:
@@ -3476,6 +3923,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             if result is not None and result.success:
                 self._populate_results(result)
                 self._populate_cluster_list(result)
+                self._populate_cluster_table(result)
                 self._result = result
                 break
 
@@ -3735,21 +4183,18 @@ class FlowSomAnalyzerPro(QMainWindow):
             QMessageBox.information(self, "Info", "Vue combinée non disponible.")
 
     def _populate_cluster_list(self, result: Any) -> None:
-        self.cluster_list.clear()
-        self.marker_list.clear()
-        self._cluster_mfi = None
-        self._all_markers = []
-
+        # Cette méthode est conservée pour rétro-compatibilité mais le peuplement
+        # visuel est désormais délégué entièrement à _populate_cluster_table.
+        # Elle ne fait plus que précalculer _cluster_mfi pour les éventuels appelants
+        # externes qui auraient pu en dépendre avant la refonte.
         if result is None or result.data is None:
             return
-
-        df = result.data
         try:
             import numpy as np
 
+            df = result.data
             if "FlowSOM_cluster" not in df.columns:
                 return
-
             _meta_cols = {
                 "FlowSOM_cluster",
                 "FlowSOM_metacluster",
@@ -3767,12 +4212,6 @@ class FlowSomAnalyzerPro(QMainWindow):
             }
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             marker_cols = [c for c in numeric_cols if c not in _meta_cols]
-            self._all_markers = marker_cols
-
-            for m in marker_cols:
-                self.marker_list.addItem(QListWidgetItem(m))
-            self.marker_list.selectAll()
-
             mc_col = "FlowSOM_metacluster" if "FlowSOM_metacluster" in df.columns else None
             mfi_df = df.groupby("FlowSOM_cluster")[marker_cols].mean()
             mfi_df["n_cells"] = df.groupby("FlowSOM_cluster").size()
@@ -3782,26 +4221,17 @@ class FlowSomAnalyzerPro(QMainWindow):
                     .agg(lambda x: int(x.mode().iloc[0]) if len(x) > 0 else -1)
                     .astype(int)
                 )
-
-            self._cluster_mfi = mfi_df
-            total_cells = len(df)
-            for cl_id, row_data in mfi_df.iterrows():
-                mc = int(row_data["metacluster"]) if "metacluster" in row_data.index else -1
-                n = int(row_data["n_cells"])
-                pct = n / total_cells * 100 if total_cells > 0 else 0
-                label_text = f"Cluster {cl_id}  (MC{mc})  — {n:,} cell. ({pct:.1f}%)"
-                self.cluster_list.addItem(QListWidgetItem(label_text))
-
-            self.cluster_list.update()
-            if self.cluster_list.count() > 0:
-                self.cluster_list.setCurrentRow(0)
-
+            # Mise à jour uniquement si _populate_cluster_table ne l'a pas déjà fait
+            if self._cluster_mfi is None:
+                self._cluster_mfi = mfi_df
+                self._all_markers = marker_cols
         except Exception as e:
             import traceback
 
             self._log(f"Erreur peuplement clusters : {e}\n{traceback.format_exc()}")
 
     def _on_cluster_selected(self, row: int) -> None:
+        # Rétro-compatibilité conservée (plus utilisé directement)
         if row >= 0 and self._cluster_mfi is not None:
             self._generate_spider_plot()
 
@@ -3810,9 +4240,9 @@ class FlowSomAnalyzerPro(QMainWindow):
             self._spider_worker.terminate()
             self._spider_worker.wait(200)
 
-        row = self.cluster_list.currentRow()
-        if row < 0 or self._cluster_mfi is None:
-            QMessageBox.information(self, "Info", "Sélectionnez un cluster.")
+        # Récupère le cluster_id depuis cluster_table (nouvelle UI)
+        cl_id = self._get_selected_cluster_id()
+        if cl_id is None or self._cluster_mfi is None:
             return
 
         selected_markers = [
@@ -3820,26 +4250,42 @@ class FlowSomAnalyzerPro(QMainWindow):
             for i in range(self.marker_list.count())
             if self.marker_list.item(i).isSelected()
         ]
-        if not selected_markers:
-            QMessageBox.warning(self, "Avertissement", "Sélectionnez au moins un marqueur.")
-            return
         if len(selected_markers) < 3:
-            QMessageBox.warning(self, "Avertissement", "Sélectionnez au moins 3 marqueurs.")
             return
 
-        cluster_ids = list(self._cluster_mfi.index)
-        if row >= len(cluster_ids):
+        if cl_id not in self._cluster_mfi.index:
             return
-        cl_id = cluster_ids[row]
         mfi_row = self._cluster_mfi.loc[cl_id]
         mc = int(mfi_row.get("metacluster", -1)) if "metacluster" in mfi_row else -1
         n = int(mfi_row.get("n_cells", 0))
         label = f"Cluster {cl_id}  (MC{mc})  — {n:,} cellules"
 
+        # Récupération des profils Patho/NBM si disponibles
+        patho_row = None
+        nbm_row = None
+        nbm_mean_row = None
+        if hasattr(self, "_patho_mfi") and self._patho_mfi is not None:
+            if cl_id in self._patho_mfi.index:
+                patho_row = self._patho_mfi.loc[cl_id]
+        if hasattr(self, "_nbm_mfi") and self._nbm_mfi is not None:
+            if cl_id in self._nbm_mfi.index:
+                nbm_row = self._nbm_mfi.loc[cl_id]
+        if hasattr(self, "_nbm_mfi_mean") and self._nbm_mfi_mean is not None:
+            nbm_mean_row = self._nbm_mfi_mean
+            # Fallback explicite pour garantir l'affichage des 3 profils quand
+            # le cluster n'existe pas côté NBM (cluster spécifique pathologique).
+            if nbm_row is None:
+                nbm_row = nbm_mean_row
+
         self._spider_worker = SpiderPlotWorker(
-            mfi_row=mfi_row[selected_markers],
+            mfi_row=mfi_row,
             marker_names=selected_markers,
             cluster_label=label,
+            patho_row=patho_row,
+            nbm_row=nbm_row,
+            nbm_mean_row=nbm_mean_row,
+            canvas_width=self.star_canvas.width(),
+            canvas_height=self.star_canvas.height(),
             parent=self,
         )
         self._spider_worker.figure_ready.connect(self._on_spider_ready)
@@ -3848,6 +4294,616 @@ class FlowSomAnalyzerPro(QMainWindow):
 
     def _on_spider_ready(self, fig: Any) -> None:
         self.star_canvas.display_figure(fig)
+
+    # ------------------------------------------------------------------
+    # Expert Focus View — helpers
+    # ------------------------------------------------------------------
+
+    def _get_selected_cluster_id(self) -> Optional[Any]:
+        """Retourne le cluster_id (UserRole) de la ligne sélectionnée dans cluster_table."""
+        row = self.cluster_table.currentRow()
+        if row < 0:
+            return None
+        item = self.cluster_table.item(row, 0)
+        if item is None:
+            return None
+        return item.data(Qt.UserRole)
+
+    def _populate_cluster_table(self, result: Any) -> None:
+        """Remplit cluster_table + marker_list depuis les résultats du pipeline."""
+        import numpy as np
+
+        self.cluster_table.setRowCount(0)
+        self.marker_list.clear()
+        self._cluster_mfi = None
+        self._cluster_mrd_flags = {}
+        self._expert_focus_included_ids = None
+        self._all_markers = []
+        self._cluster_status = {}
+        self._nbm_mfi = None
+        self._nbm_mfi_mean = None
+        self._patho_mfi = None
+
+        if result is None or result.data is None:
+            return
+
+        df = result.data
+        if "FlowSOM_cluster" not in df.columns:
+            return
+
+        _meta_cols = {
+            "FlowSOM_cluster",
+            "FlowSOM_metacluster",
+            "condition",
+            "file_origin",
+            "xGrid",
+            "yGrid",
+            "xNodes",
+            "yNodes",
+            "size",
+            "Condition_Num",
+            "Condition",
+            "Timepoint",
+            "Timepoint_Num",
+        }
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        marker_cols = [c for c in numeric_cols if c not in _meta_cols]
+        self._all_markers = marker_cols
+
+        for m in marker_cols:
+            self.marker_list.addItem(QListWidgetItem(m))
+        self.marker_list.selectAll()
+
+        mc_col = "FlowSOM_metacluster" if "FlowSOM_metacluster" in df.columns else None
+        mfi_df = df.groupby("FlowSOM_cluster")[marker_cols].mean()
+        mfi_df["n_cells"] = df.groupby("FlowSOM_cluster").size()
+        if mc_col:
+            mfi_df["metacluster"] = (
+                df.groupby("FlowSOM_cluster")[mc_col]
+                .agg(lambda x: int(x.mode().iloc[0]) if len(x) > 0 else -1)
+                .astype(int)
+            )
+        self._cluster_mfi = mfi_df
+        total_cells = len(df)
+
+        # Calcul % Patho par cluster
+        pct_patho_by_cluster: dict = {}
+        cond_col = next((c for c in ("Condition", "condition") if c in df.columns), None)
+        if cond_col:
+            for cl_id, grp in df.groupby("FlowSOM_cluster"):
+                n_patho = (
+                    grp[cond_col].astype(str).str.lower().str.contains("patho", na=False).sum()
+                )
+                pct_patho_by_cluster[cl_id] = n_patho / len(grp) * 100 if len(grp) > 0 else 0.0
+
+        # Calcul profils Patho/NBM si la colonne Condition existe
+        if cond_col:
+            patho_mask = (
+                df[cond_col].astype(str).str.lower().str.contains("patho|pathologique", na=False)
+            )
+            nbm_mask = (
+                df[cond_col]
+                .astype(str)
+                .str.lower()
+                .str.contains(
+                    "nbm|healthy|normal|sain|controle|control",
+                    na=False,
+                )
+            )
+            df_patho = df[patho_mask]
+            df_nbm = df[nbm_mask]
+            if len(df_patho) > 0 and "FlowSOM_cluster" in df_patho.columns:
+                self._patho_mfi = df_patho.groupby("FlowSOM_cluster")[marker_cols].mean()
+            if len(df_nbm) > 0 and "FlowSOM_cluster" in df_nbm.columns:
+                self._nbm_mfi = df_nbm.groupby("FlowSOM_cluster")[marker_cols].mean()
+                self._nbm_mfi_mean = df_nbm[marker_cols].mean()
+
+        # Stocker pct_patho pour le tri
+        self._pct_patho_by_cluster = pct_patho_by_cluster
+
+        # ── Construire le lookup des flags MRD par cluster_id ────────────
+        # Les clusters SOM correspondent aux cluster_id du MRDResult.per_node.
+        # Compat rétro: certains objets exposent node_id.
+        self._cluster_mrd_flags: Dict[Any, tuple] = {}
+        mrd_result = getattr(result, "mrd_result", None)
+        raw_flags: Dict[int, tuple] = {}
+
+        def _to_int_id(value: Any) -> Optional[int]:
+            try:
+                if value is None:
+                    return None
+                return int(value)
+            except Exception:
+                return None
+
+        if mrd_result is not None:
+            for node in getattr(mrd_result, "per_node", []):
+                nid = getattr(node, "cluster_id", None)
+                if nid is None:
+                    nid = getattr(node, "node_id", None)
+                if nid is not None:
+                    nid_i = _to_int_id(nid)
+                    if nid_i is None:
+                        continue
+                    raw_flags[nid_i] = (
+                        bool(getattr(node, "is_mrd_jf", False)),
+                        bool(getattr(node, "is_mrd_flo", False)),
+                        bool(getattr(node, "is_mrd_eln", False)),
+                    )
+
+        # Résout automatiquement un éventuel décalage 0-based / 1-based.
+        cluster_ids = {
+            cid for cid in (_to_int_id(x) for x in list(mfi_df.index)) if cid is not None
+        }
+        offset = 0
+        if raw_flags and cluster_ids:
+            best_overlap = -1
+            for cand in (-1, 0, 1):
+                mapped_ids = {nid + cand for nid in raw_flags.keys()}
+                overlap = len(mapped_ids & cluster_ids)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    offset = cand
+
+        for nid, flags in raw_flags.items():
+            mapped_cluster_id = nid + offset
+            prev = self._cluster_mrd_flags.get(mapped_cluster_id, (False, False, False))
+            self._cluster_mrd_flags[mapped_cluster_id] = (
+                bool(prev[0] or flags[0]),
+                bool(prev[1] or flags[1]),
+                bool(prev[2] or flags[2]),
+            )
+
+        # Méthode MRD active pour la pré-sélection initiale
+        _mrd_sel = getattr(self, "combo_cluster_mrd_method", None)
+        _active_mrd = _mrd_sel.currentText() if _mrd_sel else "Tout décocher"
+
+        # Palette de couleurs pour les clusters (tab20 cyclique)
+        import matplotlib.cm as _cm
+
+        _cmap = _cm.get_cmap("tab20", max(len(mfi_df), 1))
+
+        # Remplissage du tableau (colonne unique + delegate)
+        self.cluster_table.setRowCount(len(mfi_df))
+        for row_idx, (cl_id, row_data) in enumerate(mfi_df.iterrows()):
+            cl_id_int = _to_int_id(cl_id)
+            cl_uid = cl_id_int if cl_id_int is not None else cl_id
+            mc = int(row_data.get("metacluster", -1)) if "metacluster" in row_data else -1
+            n = int(row_data.get("n_cells", 0))
+            pct_p = pct_patho_by_cluster.get(cl_id, 0.0)
+
+            flags = self._cluster_mrd_flags.get(cl_uid, (False, False, False))
+            active_methods = [name for ok, name in zip(flags, ("JF", "Flo", "ELN")) if ok]
+            method_tag = "/".join(active_methods) if active_methods else "—"
+
+            # Texte affiché dans la colonne unique
+            label = (
+                f"Cluster {cl_uid}  ·  MC{mc}  ·  {pct_p:.1f} %  ({n:,} cells)"
+                f"  ·  MRD: {method_tag}"
+            )
+            item = QTableWidgetItem(label)
+            item.setData(Qt.UserRole, cl_uid)
+
+            # Couleur de la pastille (QColor depuis la colormap)
+            rgba = _cmap(row_idx % 20)
+            cl_color = QColor(
+                int(rgba[0] * 255),
+                int(rgba[1] * 255),
+                int(rgba[2] * 255),
+                255,
+            )
+            item.setData(_CL_COLOR_ROLE, cl_color)
+
+            # Flags MRD pour les badges dans le delegate
+            item.setData(_CL_MRD_ROLE, flags)
+
+            # Statut initial : priorité à la curation Expert Focus si disponible,
+            # sinon pré-sélection par méthode MRD.
+            if self._expert_focus_included_ids is not None and cl_id_int is not None:
+                initial_status = (
+                    "approved" if cl_id_int in self._expert_focus_included_ids else "rejected"
+                )
+            else:
+                initial_status = self._compute_initial_cluster_status(cl_uid, _active_mrd)
+            item.setData(_CL_STATUS_ROLE, initial_status)
+
+            self.cluster_table.setItem(row_idx, 0, item)
+            self._cluster_status[cl_uid] = initial_status
+
+        self._populate_focus_axes()
+        if self.cluster_table.rowCount() > 0:
+            self.cluster_table.selectRow(0)
+        self._sync_cluster_statuses_from_node_table()
+
+    def _populate_focus_axes(self) -> None:
+        """Peuple les combo X/Y du focus scatter avec les marqueurs disponibles."""
+        if not self._all_markers:
+            return
+        for combo in (self.combo_focus_x, self.combo_focus_y):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(self._all_markers)
+            combo.blockSignals(False)
+        markers_lower = [m.lower() for m in self._all_markers]
+        for pref, combo in (("cd45", self.combo_focus_x), ("ssc", self.combo_focus_y)):
+            for i, ml in enumerate(markers_lower):
+                if pref in ml:
+                    combo.setCurrentIndex(i)
+                    break
+        # Déclencher le plot maintenant que les signaux sont débloqués
+        self._update_focus_plot()
+
+    def _compute_initial_cluster_status(self, cl_id: Any, method: str) -> Optional[str]:
+        """Retourne le statut initial d'un cluster selon la méthode MRD active."""
+        flags = getattr(self, "_cluster_mrd_flags", {}).get(cl_id, (False, False, False))
+        is_jf, is_flo, is_eln = flags
+        if method == "JF":
+            return "approved" if is_jf else "rejected"
+        if method == "Flo":
+            return "approved" if is_flo else "rejected"
+        if method == "ELN":
+            return "approved" if is_eln else "rejected"
+        # "Tout décocher" (ou valeur inconnue) : rejeter tout explicitement.
+        return "rejected"
+
+    def _on_cluster_mrd_method_changed(self, *_: Any) -> None:
+        """Re-applique la pré-sélection de statut lors du changement de méthode MRD."""
+        # L'utilisateur vient de choisir une méthode : on revient au mode
+        # "pré-sélection algorithmique" (hors synchronisation Expert Focus).
+        self._expert_focus_included_ids = None
+        method = self.combo_cluster_mrd_method.currentText()
+        for r in range(self.cluster_table.rowCount()):
+            item = self.cluster_table.item(r, 0)
+            if item is None:
+                continue
+            cl_id = item.data(Qt.UserRole)
+            status = self._compute_initial_cluster_status(cl_id, method)
+            item.setData(_CL_STATUS_ROLE, status)
+            self._cluster_status[cl_id] = status
+        self.cluster_table.viewport().update()
+        self._sync_node_table_from_cluster_statuses()
+
+    def _on_expert_focus_curation_applied(self, payload: Dict[str, Any]) -> None:
+        """Synchronise instantanément l'onglet Clusters avec Expert Focus Dialog."""
+        included_ids: set[int] = set()
+        for raw in payload.get("included_ids", []):
+            try:
+                included_ids.add(int(raw))
+            except Exception:
+                continue
+
+        self._expert_focus_included_ids = included_ids
+
+        for r in range(self.cluster_table.rowCount()):
+            item = self.cluster_table.item(r, 0)
+            if item is None:
+                continue
+            cl_id = item.data(Qt.UserRole)
+            try:
+                cl_id_i = int(cl_id)
+            except Exception:
+                continue
+            status = "approved" if cl_id_i in included_ids else "rejected"
+            item.setData(_CL_STATUS_ROLE, status)
+            self._cluster_status[cl_id_i] = status
+
+        self.cluster_table.viewport().update()
+        self._sync_node_table_from_cluster_statuses()
+
+    def _on_cluster_table_selected(self, row: int) -> None:
+        if row < 0:
+            return
+        self._update_focus_plot()
+        self._generate_spider_plot()
+
+    def _filter_cluster_table(self, text: str) -> None:
+        text = text.lower()
+        for r in range(self.cluster_table.rowCount()):
+            row_text = " ".join(
+                self.cluster_table.item(r, c).text().lower()
+                for c in range(self.cluster_table.columnCount())
+                if self.cluster_table.item(r, c)
+            )
+            self.cluster_table.setRowHidden(r, bool(text) and text not in row_text)
+
+    def _on_marker_selection_changed(self) -> None:
+        """Régénère automatiquement le radar quand la sélection de marqueurs change."""
+        self._generate_spider_plot()
+
+    def _sort_cluster_table(self, sort_index: int) -> None:
+        """Tri de la liste clusters via tri logique sur les UserRole stockés."""
+        import numpy as np
+
+        current_cl_id = self._get_selected_cluster_id()
+        n = self.cluster_table.rowCount()
+        if n == 0 or self._cluster_mfi is None:
+            return
+
+        # Récupérer tous les items avec leurs méta-données
+        rows_data = []
+        for r in range(n):
+            item = self.cluster_table.item(r, 0)
+            if item is None:
+                continue
+            cl_id = item.data(Qt.UserRole)
+            mfi_row = self._cluster_mfi.loc[cl_id] if cl_id in self._cluster_mfi.index else None
+            n_cells = int(mfi_row.get("n_cells", 0)) if mfi_row is not None else 0
+            mc = (
+                int(mfi_row.get("metacluster", -1))
+                if (mfi_row is not None and "metacluster" in mfi_row)
+                else -1
+            )
+            pct_p = 0.0
+            if hasattr(self, "_pct_patho_by_cluster"):
+                pct_p = self._pct_patho_by_cluster.get(cl_id, 0.0)
+            rows_data.append((r, cl_id, mc, n_cells, pct_p, item))
+
+        key_funcs = {
+            0: lambda x: x[1],  # Cluster ↑
+            1: lambda x: -x[1],  # Cluster ↓
+            2: lambda x: -x[3],  # Cellules ↓
+            3: lambda x: -x[4],  # % Patho ↓
+            4: lambda x: x[2],  # Métacluster ↑
+        }
+        key_fn = key_funcs.get(sort_index, lambda x: x[1])
+        rows_data.sort(key=key_fn)
+
+        # Réinsérer les items dans le nouvel ordre
+        self.cluster_table.blockSignals(True)
+        for new_row, (_, _, _, _, _, item) in enumerate(rows_data):
+            self.cluster_table.takeItem(new_row, 0)
+        for new_row, (_, _, _, _, _, item) in enumerate(rows_data):
+            self.cluster_table.setItem(new_row, 0, item)
+        self.cluster_table.blockSignals(False)
+
+        # Restaurer la sélection
+        if current_cl_id is not None:
+            for r in range(self.cluster_table.rowCount()):
+                it = self.cluster_table.item(r, 0)
+                if it and it.data(Qt.UserRole) == current_cl_id:
+                    self.cluster_table.selectRow(r)
+                    break
+
+    def _set_cluster_status_row(self, row: int, status: str) -> None:
+        """Appelé par ClusterItemDelegate sur clic ✓/✗ inline."""
+        item = self.cluster_table.item(row, 0)
+        if item is None:
+            return
+        cl_id = item.data(Qt.UserRole)
+        self._cluster_status[cl_id] = status
+        item.setData(_CL_STATUS_ROLE, status)
+        self.cluster_table.update(self.cluster_table.model().index(row, 0))
+        self._sync_node_table_from_cluster_statuses()
+
+    def _set_cluster_status(self, status: str) -> None:
+        row = self.cluster_table.currentRow()
+        if row < 0:
+            return
+        self._set_cluster_status_row(row, status)
+
+    def _set_all_cluster_status(self, status: str) -> None:
+        for r in range(self.cluster_table.rowCount()):
+            self._set_cluster_status_row(r, status)
+
+    def _sync_node_table_from_cluster_statuses(self) -> None:
+        """Propulse l'état de l'onglet Clusters vers la validation nœuds MRD."""
+        node_table = getattr(getattr(self, "_home_tab", None), "_node_table", None)
+        if node_table is None:
+            return
+        if not getattr(node_table, "_nodes", None):
+            return
+
+        included_ids: set[int] = set()
+        for cl_id, st in self._cluster_status.items():
+            if st != "approved":
+                continue
+            try:
+                included_ids.add(int(cl_id))
+            except Exception:
+                continue
+
+        try:
+            node_table.apply_included_node_ids(included_ids, emit_ratio=True)
+            self._set_cluster_sync_badge(f"Synchro active ({len(included_ids)} inclus)")
+        except Exception as _e:
+            self._log(f"Sync Clusters -> NodeTable ignorée: {_e}")
+            self._set_cluster_sync_badge("Synchro en attente")
+
+    def _sync_cluster_statuses_from_node_table(self) -> None:
+        """Propulse l'état KEEP/DISCARD de la validation nœuds vers l'onglet Clusters."""
+        node_table = getattr(getattr(self, "_home_tab", None), "_node_table", None)
+        if node_table is None:
+            return
+        if not getattr(node_table, "_nodes", None):
+            return
+
+        try:
+            included_ids = set(node_table.get_included_node_ids())
+        except Exception:
+            return
+
+        for r in range(self.cluster_table.rowCount()):
+            item = self.cluster_table.item(r, 0)
+            if item is None:
+                continue
+            cl_id = item.data(Qt.UserRole)
+            try:
+                cl_id_i = int(cl_id)
+            except Exception:
+                continue
+            status = "approved" if cl_id_i in included_ids else "rejected"
+            item.setData(_CL_STATUS_ROLE, status)
+            self._cluster_status[cl_id_i] = status
+
+        self.cluster_table.viewport().update()
+        self._set_cluster_sync_badge(f"Synchro active ({len(included_ids)} inclus)")
+
+    def _set_cluster_sync_badge(self, text: str) -> None:
+        """Met à jour le badge de synchronisation visible dans l'onglet Clusters."""
+        lbl = getattr(self, "_lbl_cluster_sync_badge", None)
+        if lbl is None:
+            return
+        lbl.setText(text)
+
+    def _update_focus_plot(self) -> None:
+        """Scatter : cluster sélectionné en couleur sur fond de toutes les cellules (gris).
+
+        Source prioritaire : current_fcs_adata (FCS exporté, intensités brutes linéaires),
+        aligné sur df["FlowSOM_cluster"] pour les labels de cluster.
+        Fallback sur result.data si current_fcs_adata indisponible ou marqueur absent.
+        """
+        import numpy as np
+
+        if self._cluster_mfi is None or self._result is None:
+            return
+
+        cl_id = self._get_selected_cluster_id()
+        if cl_id is None:
+            return
+
+        x_marker = self.combo_focus_x.currentText()
+        y_marker = self.combo_focus_y.currentText()
+        if not x_marker or not y_marker:
+            return
+
+        df = self._result.data
+        if df is None or "FlowSOM_cluster" not in df.columns:
+            return
+
+        _using_raw = False
+        x_all = y_all = cluster_vals = None
+
+        def _try_extract_from_adata(adata_src: Any) -> bool:
+            nonlocal x_all, y_all, cluster_vals, _using_raw
+            try:
+                X = adata_src.X
+                if hasattr(X, "toarray"):
+                    X = X.toarray()
+                if X.shape[0] != len(df):
+                    return False  # tailles incohérentes → ne pas croiser les sources
+                var_names = list(adata_src.var_names)
+                _vn_norm = [v.lower().replace(" ", "_") for v in var_names]
+                _xk = x_marker.lower().replace(" ", "_")
+                _yk = y_marker.lower().replace(" ", "_")
+                xi = _vn_norm.index(_xk) if _xk in _vn_norm else None
+                yi = _vn_norm.index(_yk) if _yk in _vn_norm else None
+                if xi is None or yi is None:
+                    return False
+                cluster_vals = df["FlowSOM_cluster"].values
+                x_all = X[:, xi].astype(float)
+                y_all = X[:, yi].astype(float)
+                _using_raw = True
+                return True
+            except (ValueError, IndexError):
+                return False
+
+        # Priorité 1 : FCS complet exporté (toutes cellules, brutes)
+        if self._full_fcs_adata is not None:
+            _try_extract_from_adata(self._full_fcs_adata)
+
+        # Priorité 2 : FCS chargé dans le viewer (si même taille que result.data)
+        if x_all is None and self.current_fcs_adata is not None:
+            _try_extract_from_adata(self.current_fcs_adata)
+
+        # Fallback : result.data (peut contenir des données transformées en mode batch)
+        if x_all is None:
+            if x_marker in df.columns and y_marker in df.columns:
+                x_all = df[x_marker].values.astype(float)
+                y_all = df[y_marker].values.astype(float)
+                cluster_vals = df["FlowSOM_cluster"].values
+            else:
+                return
+
+        _info_lbl = getattr(self, "_lbl_scatter_axis_info", None)
+        if _info_lbl is not None:
+            if _using_raw:
+                _info_lbl.setText("ℹ  Intensités brutes (linéaires) — même échelle que l'onglet Viewer FCS")
+            else:
+                _info_lbl.setText("⚠  Intensités transformées (arcsinh/logicle) — chargez le FCS complet exporté dans Viewer FCS pour l'échelle brute")
+
+        mask_cluster = cluster_vals == cl_id
+        _N_BG = 15_000
+        bg_idx = np.where(~mask_cluster)[0]
+        if len(bg_idx) > _N_BG:
+            bg_idx = np.random.choice(bg_idx, _N_BG, replace=False)
+
+        x_bg = x_all[bg_idx]
+        y_bg = y_all[bg_idx]
+        x_cl = x_all[mask_cluster]
+        y_cl = y_all[mask_cluster]
+
+        # Couleur du cluster : récupérer depuis l'item du delegate (cohérence visuelle)
+        cl_color_qt = None
+        for r in range(self.cluster_table.rowCount()):
+            it = self.cluster_table.item(r, 0)
+            if it and it.data(Qt.UserRole) == cl_id:
+                cl_color_qt = it.data(_CL_COLOR_ROLE)
+                break
+        if isinstance(cl_color_qt, QColor):
+            cl_color = (
+                cl_color_qt.red() / 255,
+                cl_color_qt.green() / 255,
+                cl_color_qt.blue() / 255,
+            )
+        else:
+            import matplotlib.cm as cm
+
+            cluster_ids = list(self._cluster_mfi.index)
+            cl_idx = cluster_ids.index(cl_id) if cl_id in cluster_ids else 0
+            cmap = cm.get_cmap("tab20", max(len(cluster_ids), 1))
+            cl_color = cmap(cl_idx % 20)
+
+        self.focus_canvas.clear_and_reset()
+        ax = self.focus_canvas.axes
+
+        # Fond : toutes cellules hors cluster — gris très transparent (alpha=0.10)
+        ax.scatter(x_bg, y_bg, s=1, alpha=0.10, color="#6c7086", rasterized=True, zorder=1)
+        # Cluster sélectionné : opaque, taille plus grande
+        ax.scatter(
+            x_cl,
+            y_cl,
+            s=6,
+            alpha=1.0,
+            color=cl_color,
+            rasterized=True,
+            zorder=2,
+            label=f"Cluster {cl_id}  ({mask_cluster.sum():,} cells)",
+        )
+
+        all_x = np.concatenate([x_bg, x_cl])
+        all_y = np.concatenate([y_bg, y_cl])
+        valid_mask = np.isfinite(all_x) & np.isfinite(all_y)
+        if valid_mask.any():
+            ax.set_xlim(*_robust_limits(all_x[valid_mask]))
+            ax.set_ylim(*_robust_limits(all_y[valid_mask]))
+
+        from matplotlib.ticker import FuncFormatter
+
+        def _fmt(v, _):
+            if abs(v) >= 1e6:
+                return f"{v / 1e6:.1f}M"
+            if abs(v) >= 1e3:
+                return f"{v / 1e3:.0f}K"
+            return f"{v:.0f}"
+
+        ax.xaxis.set_major_formatter(FuncFormatter(_fmt))
+        ax.yaxis.set_major_formatter(FuncFormatter(_fmt))
+
+        ax.set_xlabel(x_marker, color="#EEF2F7", fontsize=9)
+        ax.set_ylabel(y_marker, color="#EEF2F7", fontsize=9)
+        ax.legend(
+            loc="upper right",
+            fontsize=7.5,
+            framealpha=0.7,
+            facecolor="#1e1e2e",
+            edgecolor="#45475a",
+            labelcolor="#EEF2F7",
+        )
+        self.focus_canvas.draw()
+
+    def _reset_focus_view(self) -> None:
+        """Recalcule le focus scatter (équivalent fit-to-screen)."""
+        self._update_focus_plot()
 
     # ==================================================================
     # Plots output
@@ -4291,6 +5347,10 @@ class FlowSomAnalyzerPro(QMainWindow):
         except Exception as _e:
             _logger.warning("_on_curation_changed patch HTML: %s", _e)
 
+        # Synchronisation bidirectionnelle : la validation MRD pilote aussi
+        # l'onglet Clusters (approved/rejected) en temps réel.
+        self._sync_cluster_statuses_from_node_table()
+
         # IMPORTANT perf UI : ne pas réécrire le FCS ici.
         # Cette opération disque coûteuse est déclenchée uniquement via les actions d'export.
 
@@ -4628,21 +5688,82 @@ class FlowSomAnalyzerPro(QMainWindow):
                 pass
             return False
 
-    def _open_html_report(self) -> None:
-        self._inject_human_curation()
+    def _open_html_report(self, report_type: str = "main") -> None:
+        """Ouvre le rapport HTML demandé.
+
+        report_type:
+            "blast"  → blast_mrd_classification_*.html  (plots/)
+            "radar"  → mrd_blast_radar_*.html            (plots/other/)
+            "main"   → rapport HTML principal
+        """
         if self._result is None:
             QMessageBox.information(self, "Info", "Aucun résultat disponible.")
             return
+
         output_files = self._result.output_files or {}
+
+        if report_type in ("blast", "radar"):
+            # Chercher le fichier dans le dossier de sortie
+            html_path_main = output_files.get("html_report") or ""
+            # Remonter jusqu'au dossier plots/ depuis html_report (qui est dans plots/)
+            if html_path_main:
+                plots_dir = Path(html_path_main).parent
+            else:
+                # Fallback : chercher depuis output_dir
+                plots_dir = None
+
+            html_path = None
+            if report_type == "blast":
+                # blast_mrd_classification_*.html dans plots/
+                if plots_dir and plots_dir.is_dir():
+                    candidates = sorted(
+                        plots_dir.glob("blast_mrd_classification_*.html"), reverse=True
+                    )
+                    html_path = str(candidates[0]) if candidates else None
+                # Fallback dans output_files
+                if not html_path:
+                    html_path = output_files.get(
+                        "fig_blast_mrd_classification"
+                    ) or output_files.get("blast_mrd_classification")
+            else:  # radar
+                # mrd_blast_radar_*.html dans plots/other/
+                if plots_dir and plots_dir.is_dir():
+                    other_dir = plots_dir / "other"
+                    candidates = (
+                        sorted(other_dir.glob("mrd_blast_radar_*.html"), reverse=True)
+                        if other_dir.is_dir()
+                        else []
+                    )
+                    if not candidates:
+                        # Certaines versions écrivent directement dans plots/
+                        candidates = sorted(plots_dir.glob("mrd_blast_radar_*.html"), reverse=True)
+                    html_path = str(candidates[0]) if candidates else None
+                if not html_path:
+                    html_path = output_files.get("fig_mrd_blast_radar") or output_files.get(
+                        "mrd_blast_radar"
+                    )
+
+            if not (html_path and Path(html_path).exists()):
+                label = (
+                    "Classification Blast MRD" if report_type == "blast" else "Radar MRD Blastes"
+                )
+                QMessageBox.information(
+                    self,
+                    "Rapport introuvable",
+                    f"Le rapport « {label} » n'a pas encore été généré pour ce résultat.\n"
+                    "Lancez le pipeline avec la Porte Biologique ELN activée.",
+                )
+                return
+            webbrowser.open(Path(html_path).as_uri())
+            return
+
+        # ── Rapport principal ────────────────────────────────────────────
+        self._inject_human_curation()
         html_path = output_files.get("html_report")
         if not (html_path and Path(html_path).exists()):
             QMessageBox.information(self, "Info", "Rapport HTML non trouvé.")
             return
 
-        # ── Patch validation experte dans le HTML existant ───────────────
-        # Dès que le biologiste a interagi avec la grille (curated_nodes is not
-        # None, même liste vide = tous écartés), on met à jour le bandeau MRD
-        # dans le fichier HTML sans régénérer les figures.
         if self._result.curated_nodes is not None:
             try:
                 from flowsom_pipeline_pro.src.visualization.html_report import (
@@ -4664,7 +5785,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             except Exception as _patch_err:
                 _logger.warning("_open_html_report patch: %s", _patch_err)
 
-        webbrowser.open(str(Path(html_path).resolve()))
+        webbrowser.open(Path(html_path).as_uri())
 
     def _open_output_folder(self) -> None:
         output = self.drop_output.path
@@ -4957,6 +6078,9 @@ class FlowSomAnalyzerPro(QMainWindow):
                 f"{Path(file_path).name}  |  {adata.shape[0]:,} cellules  |  {adata.shape[1]} paramètres"
             )
             self._update_fcs_plot()
+            # Synchroniser les axes du focus scatter avec les marqueurs du FCS chargé
+            if self._all_markers:
+                self._populate_focus_axes()
             self._log(f"FCS chargé : {adata.shape[0]:,} cellules, {adata.shape[1]} paramètres")
 
         except Exception as e:
@@ -5317,10 +6441,13 @@ class FlowSomAnalyzerPro(QMainWindow):
 
             ax.xaxis.set_major_formatter(FuncFormatter(_fmt))
             ax.yaxis.set_major_formatter(FuncFormatter(_fmt))
-            x_margin = max((x_data.max() - x_data.min()) * 0.02, 1)
-            y_margin = max((y_data.max() - y_data.min()) * 0.02, 1)
-            ax.set_xlim(x_data.min() - x_margin, x_data.max() + x_margin)
-            ax.set_ylim(y_data.min() - y_margin, y_data.max() + y_margin)
+            # Auto-scaling robuste : écrête les outliers via quantiles
+            if is_som_x or is_som_y or is_dim_x or is_dim_y:
+                ax.set_xlim(*_robust_limits(x_data, 0.01, 0.99, 0.06))
+                ax.set_ylim(*_robust_limits(y_data, 0.01, 0.99, 0.06))
+            else:
+                ax.set_xlim(*_robust_limits(x_data))
+                ax.set_ylim(*_robust_limits(y_data))
 
             subtitle = f"{n_shown:,} cellules"
             if apply_jitter and (is_som_x or is_som_y):
@@ -5345,6 +6472,31 @@ class FlowSomAnalyzerPro(QMainWindow):
         finally:
             # Toujours réactiver le canvas, même en cas d'exception
             self.fcs_viz_canvas.setEnabled(True)
+
+    def _reset_fcs_view(self) -> None:
+        """Fit-to-screen robuste : recalcule les limites sur toutes les données sans subsample."""
+        import numpy as np
+
+        if self.current_fcs_adata is None:
+            return
+        x_marker = self.combo_fcs_x.currentText()
+        y_marker = self.combo_fcs_y.currentText()
+        if not x_marker or not y_marker:
+            return
+        X = self.current_fcs_adata.X
+        if hasattr(X, "toarray"):
+            X = X.toarray()
+        var_names = list(self.current_fcs_adata.var_names)
+        try:
+            x_data = X[:, var_names.index(x_marker)]
+            y_data = X[:, var_names.index(y_marker)]
+            mask = np.isfinite(x_data) & np.isfinite(y_data)
+            ax = self.fcs_viz_canvas.axes
+            ax.set_xlim(*_robust_limits(x_data[mask], 0.002, 0.998, 0.05))
+            ax.set_ylim(*_robust_limits(y_data[mask], 0.002, 0.998, 0.05))
+            self.fcs_viz_canvas.draw()
+        except (ValueError, IndexError):
+            pass
 
     # ==================================================================
     # Persistance de session (P3.4)
@@ -5501,9 +6653,16 @@ class FlowSomAnalyzerPro(QMainWindow):
                 self._worker._log_capture.stop_drain()
 
             # Déconnecter tous les signaux pour éviter les callbacks sur widget détruit
-            for sig_name in ("log_message", "finished", "error", "progress",
-                             "gating_done", "prescreening_done",
-                             "file_started", "file_finished"):
+            for sig_name in (
+                "log_message",
+                "finished",
+                "error",
+                "progress",
+                "gating_done",
+                "prescreening_done",
+                "file_started",
+                "file_finished",
+            ):
                 sig = getattr(self._worker, sig_name, None)
                 if sig is not None:
                     try:
