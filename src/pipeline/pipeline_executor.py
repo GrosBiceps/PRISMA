@@ -882,6 +882,25 @@ class FlowSOMPipeline:
                 X_stacked, selected_markers, obs, metaclustering, clustering
             )
 
+            # ── Données brutes alignées sur df_cells ──────────────────────────
+            # Construit un DataFrame de même longueur que df_cells avec les
+            # intensités linéaires pré-transformation, pour la visualisation GUI.
+            _raw_data_df = None
+            try:
+                _X_raw, _raw_var_names, _ = stack_raw_markers(samples_used)
+                if _X_raw.shape[0] == len(df_cells):
+                    import pandas as _pd_raw
+                    _raw_data_df = _pd_raw.DataFrame(
+                        _X_raw, columns=_raw_var_names, index=df_cells.index
+                    )
+                else:
+                    _logger.warning(
+                        "raw_data_df: taille incohérente (%d vs %d) — ignoré",
+                        _X_raw.shape[0], len(df_cells),
+                    )
+            except Exception as _e_raw:
+                _logger.debug("raw_data_df: non disponible (%s)", _e_raw)
+
             # ── Étape 4c: Pré-screening CD34+/CD45dim (TOUJOURS exécuté) ─────
             # Calcul heuristique sur les données transformées post-gating.
             # Indépendant des paramètres cd34 de l'utilisateur.
@@ -2188,6 +2207,7 @@ class FlowSOMPipeline:
 
             result = PipelineResult(
                 data=df_cells,
+                raw_data=_raw_data_df,
                 mfi_matrix=mfi_matrix,
                 node_mfi_matrix=node_mfi_matrix,
                 gating_report=[e.to_dict() for e in self._gating_logger.events],

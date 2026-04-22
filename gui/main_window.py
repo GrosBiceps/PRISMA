@@ -684,8 +684,7 @@ class FlowSomAnalyzerPro(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PRISMA")
-        self.setMinimumSize(1280, 820)
-        self.resize(1600, 960)
+        self.setMinimumSize(1100, 720)
 
         # App icon — works both from source and PyInstaller bundle
         _ico = _asset_path("prisma_logo.ico")
@@ -709,7 +708,11 @@ class FlowSomAnalyzerPro(QMainWindow):
         self._gate_plot_paths: Dict[str, str] = {}
         self._combined_html_path: Optional[str] = None
         self.current_fcs_adata: Optional[Any] = None
-        self._full_fcs_adata: Optional[Any] = None   # FCS complet (toutes cellules) pour scatter clusters
+        self._fcs_adata_raw: Optional[Any] = None       # copie brute pour le toggle viewer FCS
+        self._fcs_viewer_mode: str = "raw"             # "raw" | "logicle" | "log"
+        self._full_fcs_adata: Optional[Any] = None           # FCS complet (toutes cellules) pour scatter clusters
+        self._full_fcs_adata_raw: Optional[Any] = None       # copie brute pour le toggle scatter clusters
+        self._clusters_viewer_mode: str = "raw"              # "raw" | "logicle"
         self._full_fcs_loader: Optional[Any] = None  # worker de chargement FCS complet
         self._patho_fcs_path: Optional[str] = None  # FCS patho auto-chargé après pipeline
         self._pending_prescreening: Optional[Dict] = None
@@ -2211,6 +2214,106 @@ class FlowSomAnalyzerPro(QMainWindow):
         scatter_layout.setContentsMargins(0, 0, 0, 0)
         scatter_layout.setSpacing(2)
 
+        # Barre toggle Brut / Logicle pour le scatter clusters
+        clusters_mode_bar = QWidget()
+        clusters_mode_bar.setObjectName("clustersModeBar")
+        clusters_mode_bar.setStyleSheet("""
+            QWidget#clustersModeBar {
+                background: rgba(91,170,255,0.06);
+                border-bottom: 1px solid rgba(91,170,255,0.18);
+            }
+        """)
+        clusters_mode_layout = QHBoxLayout(clusters_mode_bar)
+        clusters_mode_layout.setContentsMargins(8, 3, 8, 3)
+        clusters_mode_layout.setSpacing(6)
+
+        _lbl_cm = QLabel("Données :")
+        _lbl_cm.setStyleSheet("color: rgba(238,242,247,0.55); font-family: Consolas; font-size: 8pt;")
+        clusters_mode_layout.addWidget(_lbl_cm)
+
+        _cm_style_active = (
+            "QPushButton { background: rgba(91,170,255,0.28); color: #5BAAFF; "
+            "border: 1px solid rgba(91,170,255,0.65); border-radius: 3px; "
+            "padding: 1px 10px; font-family: Consolas; font-size: 8pt; font-weight: bold; }"
+        )
+        _cm_style_inactive = (
+            "QPushButton { background: transparent; color: rgba(238,242,247,0.42); "
+            "border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; "
+            "padding: 1px 10px; font-family: Consolas; font-size: 8pt; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.07); color: rgba(238,242,247,0.65); }"
+        )
+        self._clusters_mode_style_active = _cm_style_active
+        self._clusters_mode_style_inactive = _cm_style_inactive
+
+        self.btn_clusters_raw = QPushButton("Brut (FCS)")
+        self.btn_clusters_raw.setFixedHeight(20)
+        self.btn_clusters_raw.setStyleSheet(_cm_style_active)
+        self.btn_clusters_raw.setToolTip("Afficher les intensités brutes telles que lues dans le FCS")
+        self.btn_clusters_raw.clicked.connect(lambda: self._set_clusters_viewer_mode("raw"))
+        clusters_mode_layout.addWidget(self.btn_clusters_raw)
+
+        self.btn_clusters_logicle = QPushButton("Logicle")
+        self.btn_clusters_logicle.setFixedHeight(20)
+        self.btn_clusters_logicle.setStyleSheet(_cm_style_inactive)
+        self.btn_clusters_logicle.setToolTip("Appliquer une transformation logicle à la volée (depuis le FCS brut)")
+        self.btn_clusters_logicle.clicked.connect(lambda: self._set_clusters_viewer_mode("logicle"))
+        clusters_mode_layout.addWidget(self.btn_clusters_logicle)
+
+        clusters_mode_layout.addStretch()
+
+        # ── Slider taille des points du cluster ──────────────────────────
+        _sep = QLabel("|")
+        _sep.setStyleSheet("color: rgba(255,255,255,0.18); font-size: 9pt; padding: 0 4px;")
+        clusters_mode_layout.addWidget(_sep)
+
+        _lbl_dot = QLabel("Points :")
+        _lbl_dot.setStyleSheet("color: rgba(238,242,247,0.55); font-family: Consolas; font-size: 8pt;")
+        clusters_mode_layout.addWidget(_lbl_dot)
+
+        from PyQt5.QtWidgets import QSlider
+        from PyQt5.QtCore import Qt as _Qt
+        self._cluster_point_size: int = 6          # valeur par défaut (matplotlib s=)
+        self.slider_cluster_pts = QSlider(_Qt.Horizontal)
+        self.slider_cluster_pts.setMinimum(1)
+        self.slider_cluster_pts.setMaximum(80)
+        self.slider_cluster_pts.setValue(self._cluster_point_size)
+        self.slider_cluster_pts.setFixedWidth(110)
+        self.slider_cluster_pts.setFixedHeight(18)
+        self.slider_cluster_pts.setToolTip("Taille des points du cluster sélectionné")
+        self.slider_cluster_pts.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 3px;
+                background: rgba(91,170,255,0.25);
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 12px; height: 12px;
+                margin: -5px 0;
+                background: #5BAAFF;
+                border-radius: 6px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(91,170,255,0.65);
+                border-radius: 2px;
+            }
+        """)
+        clusters_mode_layout.addWidget(self.slider_cluster_pts)
+
+        self._lbl_cluster_pts_val = QLabel(str(self._cluster_point_size))
+        self._lbl_cluster_pts_val.setStyleSheet(
+            "color: #5BAAFF; font-family: Consolas; font-size: 8pt; min-width: 20px;"
+        )
+        clusters_mode_layout.addWidget(self._lbl_cluster_pts_val)
+
+        def _on_cluster_pts_changed(val: int) -> None:
+            self._cluster_point_size = val
+            self._lbl_cluster_pts_val.setText(str(val))
+            self._update_focus_plot()
+
+        self.slider_cluster_pts.valueChanged.connect(_on_cluster_pts_changed)
+
+        scatter_layout.addWidget(clusters_mode_bar)
+
         self._lbl_scatter_axis_info = QLabel(
             "ℹ  Intensités brutes (linéaires) — même échelle que l'onglet Viewer FCS"
         )
@@ -2434,6 +2537,63 @@ class FlowSomAnalyzerPro(QMainWindow):
 
         ctrl_layout.addStretch()
         layout.addWidget(ctrl)
+
+        # ── Barre de mode données : Brut FCS / Logicle ──────────────────────
+        mode_bar = QWidget()
+        mode_bar.setObjectName("fcsViewerModeBar")
+        mode_bar.setStyleSheet("""
+            QWidget#fcsViewerModeBar {
+                background: rgba(91,170,255,0.06);
+                border-bottom: 1px solid rgba(91,170,255,0.18);
+            }
+        """)
+        mode_layout = QHBoxLayout(mode_bar)
+        mode_layout.setContentsMargins(10, 4, 10, 4)
+        mode_layout.setSpacing(8)
+
+        _lbl_mode = QLabel("Données :")
+        _lbl_mode.setStyleSheet("color: rgba(238,242,247,0.55); font-family: Consolas; font-size: 8pt;")
+        mode_layout.addWidget(_lbl_mode)
+
+        _style_active = (
+            "QPushButton { background: rgba(91,170,255,0.28); color: #5BAAFF; "
+            "border: 1px solid rgba(91,170,255,0.65); border-radius: 3px; "
+            "padding: 1px 12px; font-family: Consolas; font-size: 8pt; font-weight: bold; } "
+        )
+        _style_inactive = (
+            "QPushButton { background: transparent; color: rgba(238,242,247,0.42); "
+            "border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; "
+            "padding: 1px 12px; font-family: Consolas; font-size: 8pt; } "
+            "QPushButton:hover { background: rgba(255,255,255,0.07); color: rgba(238,242,247,0.65); }"
+        )
+
+        self.btn_fcs_raw = QPushButton("Brut (FCS)")
+        self.btn_fcs_raw.setFixedHeight(22)
+        self.btn_fcs_raw.setStyleSheet(_style_active)
+        self.btn_fcs_raw.setToolTip("Afficher les données brutes telles que lues dans le fichier FCS")
+        mode_layout.addWidget(self.btn_fcs_raw)
+
+        self.btn_fcs_logicle = QPushButton("Logicle")
+        self.btn_fcs_logicle.setFixedHeight(22)
+        self.btn_fcs_logicle.setStyleSheet(_style_inactive)
+        self.btn_fcs_logicle.setToolTip("Appliquer une transformation logicle à la volée (tous les canaux)")
+        mode_layout.addWidget(self.btn_fcs_logicle)
+
+        self.btn_fcs_log = QPushButton("Log₁₀")
+        self.btn_fcs_log.setFixedHeight(22)
+        self.btn_fcs_log.setStyleSheet(_style_inactive)
+        self.btn_fcs_log.setToolTip("Appliquer log10(x+1) à la volée sur tous les canaux (vue classique cytométrie)")
+        mode_layout.addWidget(self.btn_fcs_log)
+
+        self._fcs_mode_style_active = _style_active
+        self._fcs_mode_style_inactive = _style_inactive
+
+        self.btn_fcs_raw.clicked.connect(lambda: self._set_fcs_viewer_mode("raw"))
+        self.btn_fcs_logicle.clicked.connect(lambda: self._set_fcs_viewer_mode("logicle"))
+        self.btn_fcs_log.clicked.connect(lambda: self._set_fcs_viewer_mode("log"))
+
+        mode_layout.addStretch()
+        layout.addWidget(mode_bar)
 
         self.fcs_viz_canvas = MatplotlibCanvas(tab, width=10, height=8)
         self.fcs_viz_canvas.setMinimumHeight(480)
@@ -3623,6 +3783,15 @@ class FlowSomAnalyzerPro(QMainWindow):
                     adata.var_names = real_names
                 except Exception:
                     pass
+            # Sauvegarder une copie brute pour le toggle
+            import copy as _copy
+            self._full_fcs_adata_raw = _copy.copy(adata)
+            self._full_fcs_adata_raw.X = adata.X.copy()
+            # Réinitialiser le mode sur "Brut" à chaque nouveau chargement
+            self._clusters_viewer_mode = "raw"
+            if hasattr(self, "btn_clusters_raw"):
+                self.btn_clusters_raw.setStyleSheet(self._clusters_mode_style_active)
+                self.btn_clusters_logicle.setStyleSheet(self._clusters_mode_style_inactive)
             self._full_fcs_adata = adata
             self._log(
                 f"[Clusters scatter] FCS complet chargé — {adata.shape[0]:,} cellules, "
@@ -4350,6 +4519,36 @@ class FlowSomAnalyzerPro(QMainWindow):
         marker_cols = [c for c in numeric_cols if c not in _meta_cols]
         self._all_markers = marker_cols
 
+        # Construire les adata pour le scatter clusters
+        # _result_data_adata     : espace logicle/arcsinh (tel que sorti du pipeline)
+        # _result_data_adata_raw : intensités brutes pré-transformation depuis result.raw_data
+        try:
+            import anndata as _ad
+            # Logicle — directement depuis result.data
+            _X_log = df[marker_cols].values.astype(np.float32)
+            _adata_log = _ad.AnnData(_X_log)
+            _adata_log.var_names = marker_cols
+            self._result_data_adata = _adata_log
+
+            # Brut — depuis result.raw_data si disponible (source exacte, pas d'approximation)
+            _raw_df = getattr(result, "raw_data", None)
+            if _raw_df is not None and len(_raw_df) == len(df):
+                # Aligner les colonnes sur marker_cols (intersection)
+                _raw_cols = [c for c in marker_cols if c in _raw_df.columns]
+                if _raw_cols:
+                    _X_raw = _raw_df[_raw_cols].values.astype(np.float32)
+                    _adata_raw = _ad.AnnData(_X_raw)
+                    _adata_raw.var_names = _raw_cols
+                    self._result_data_adata_raw = _adata_raw
+                else:
+                    self._result_data_adata_raw = None
+            else:
+                # Pas de raw_data (ancien résultat chargé) → adata_raw indisponible
+                self._result_data_adata_raw = None
+        except Exception:
+            self._result_data_adata = None
+            self._result_data_adata_raw = None
+
         for m in marker_cols:
             self.marker_list.addItem(QListWidgetItem(m))
         self.marker_list.selectAll()
@@ -4485,13 +4684,21 @@ class FlowSomAnalyzerPro(QMainWindow):
             item.setData(Qt.UserRole, cl_uid)
 
             # Couleur de la pastille (QColor depuis la colormap)
+            # Éviter les couleurs trop claires (proches du blanc) qui se
+            # confondent avec le fond blanc des points hors-cluster.
+            _FALLBACK_COLORS = [
+                (0.122, 0.467, 0.706), (1.0, 0.498, 0.055), (0.173, 0.627, 0.173),
+                (0.839, 0.153, 0.157), (0.580, 0.404, 0.741), (0.549, 0.337, 0.294),
+                (0.890, 0.467, 0.761), (0.498, 0.498, 0.498), (0.737, 0.741, 0.133),
+                (0.090, 0.745, 0.812),
+            ]
             rgba = _cmap(row_idx % 20)
-            cl_color = QColor(
-                int(rgba[0] * 255),
-                int(rgba[1] * 255),
-                int(rgba[2] * 255),
-                255,
-            )
+            r_f, g_f, b_f = rgba[0], rgba[1], rgba[2]
+            # Luminance perceptive — si > 0.75, remplacer par la couleur de fallback
+            _lum = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+            if _lum > 0.75:
+                r_f, g_f, b_f = _FALLBACK_COLORS[row_idx % len(_FALLBACK_COLORS)]
+            cl_color = QColor(int(r_f * 255), int(g_f * 255), int(b_f * 255), 255)
             item.setData(_CL_COLOR_ROLE, cl_color)
 
             # Flags MRD pour les badges dans le delegate
@@ -4773,53 +4980,58 @@ class FlowSomAnalyzerPro(QMainWindow):
         _using_raw = False
         x_all = y_all = cluster_vals = None
 
-        def _try_extract_from_adata(adata_src: Any) -> bool:
-            nonlocal x_all, y_all, cluster_vals, _using_raw
+        _viewer_mode = getattr(self, "_clusters_viewer_mode", "raw")
+        _info_lbl = getattr(self, "_lbl_scatter_axis_info", None)
+
+        # Sélectionner la source selon le mode
+        # _result_data_adata     = valeurs logicle (telles que sortent du pipeline)
+        # _result_data_adata_raw = valeurs brutes (inverse transform)
+        _src = None
+        _src_label = ""
+        if _viewer_mode == "logicle":
+            _src = getattr(self, "_result_data_adata", None)
+            _src_label = "Logicle (espace pipeline)"
+        else:
+            _src = getattr(self, "_result_data_adata_raw", None)
+            if _src is not None:
+                _src_label = "ℹ  Intensités brutes (valeurs FCS linéaires)"
+            else:
+                # Pas de raw_data — relancer le pipeline pour l'obtenir
+                _src = getattr(self, "_result_data_adata", None)
+                _src_label = "⚠  Brut non disponible (résultat ancien) — logicle pipeline affiché"
+
+        if _src is not None:
             try:
-                X = adata_src.X
+                X = _src.X
                 if hasattr(X, "toarray"):
                     X = X.toarray()
-                if X.shape[0] != len(df):
-                    return False  # tailles incohérentes → ne pas croiser les sources
-                var_names = list(adata_src.var_names)
+                var_names = list(_src.var_names)
                 _vn_norm = [v.lower().replace(" ", "_") for v in var_names]
                 _xk = x_marker.lower().replace(" ", "_")
                 _yk = y_marker.lower().replace(" ", "_")
                 xi = _vn_norm.index(_xk) if _xk in _vn_norm else None
                 yi = _vn_norm.index(_yk) if _yk in _vn_norm else None
-                if xi is None or yi is None:
-                    return False
-                cluster_vals = df["FlowSOM_cluster"].values
-                x_all = X[:, xi].astype(float)
-                y_all = X[:, yi].astype(float)
-                _using_raw = True
-                return True
-            except (ValueError, IndexError):
-                return False
+                if xi is not None and yi is not None:
+                    cluster_vals = df["FlowSOM_cluster"].values
+                    x_all = X[:, xi].astype(float)
+                    y_all = X[:, yi].astype(float)
+                    _using_raw = True
+            except Exception:
+                pass
 
-        # Priorité 1 : FCS complet exporté (toutes cellules, brutes)
-        if self._full_fcs_adata is not None:
-            _try_extract_from_adata(self._full_fcs_adata)
-
-        # Priorité 2 : FCS chargé dans le viewer (si même taille que result.data)
-        if x_all is None and self.current_fcs_adata is not None:
-            _try_extract_from_adata(self.current_fcs_adata)
-
-        # Fallback : result.data (peut contenir des données transformées en mode batch)
+        # Fallback ultime : colonnes brutes de result.data (logicle)
         if x_all is None:
             if x_marker in df.columns and y_marker in df.columns:
                 x_all = df[x_marker].values.astype(float)
                 y_all = df[y_marker].values.astype(float)
                 cluster_vals = df["FlowSOM_cluster"].values
+                _using_raw = False
+                _src_label = "⚠  Adata non construit — logicle pipeline brut"
             else:
                 return
 
-        _info_lbl = getattr(self, "_lbl_scatter_axis_info", None)
         if _info_lbl is not None:
-            if _using_raw:
-                _info_lbl.setText("ℹ  Intensités brutes (linéaires) — même échelle que l'onglet Viewer FCS")
-            else:
-                _info_lbl.setText("⚠  Intensités transformées (arcsinh/logicle) — chargez le FCS complet exporté dans Viewer FCS pour l'échelle brute")
+            _info_lbl.setText(_src_label)
 
         mask_cluster = cluster_vals == cl_id
         _N_BG = 15_000
@@ -4856,13 +5068,14 @@ class FlowSomAnalyzerPro(QMainWindow):
         self.focus_canvas.clear_and_reset()
         ax = self.focus_canvas.axes
 
+        _pt_size = getattr(self, "_cluster_point_size", 6)
         # Fond : toutes cellules hors cluster — gris très transparent (alpha=0.10)
-        ax.scatter(x_bg, y_bg, s=1, alpha=0.10, color="#6c7086", rasterized=True, zorder=1)
-        # Cluster sélectionné : opaque, taille plus grande
+        ax.scatter(x_bg, y_bg, s=1, alpha=0.15, color="#ffffff", rasterized=True, zorder=1)
+        # Cluster sélectionné : opaque, taille contrôlée par le slider
         ax.scatter(
             x_cl,
             y_cl,
-            s=6,
+            s=_pt_size,
             alpha=1.0,
             color=cl_color,
             rasterized=True,
@@ -5754,7 +5967,7 @@ class FlowSomAnalyzerPro(QMainWindow):
                     "Lancez le pipeline avec la Porte Biologique ELN activée.",
                 )
                 return
-            webbrowser.open(Path(html_path).as_uri())
+            os.startfile(str(Path(html_path).resolve()))
             return
 
         # ── Rapport principal ────────────────────────────────────────────
@@ -5785,7 +5998,7 @@ class FlowSomAnalyzerPro(QMainWindow):
             except Exception as _patch_err:
                 _logger.warning("_open_html_report patch: %s", _patch_err)
 
-        webbrowser.open(Path(html_path).as_uri())
+        os.startfile(str(Path(html_path).resolve()))
 
     def _open_output_folder(self) -> None:
         output = self.drop_output.path
@@ -5984,6 +6197,18 @@ class FlowSomAnalyzerPro(QMainWindow):
                 pass
 
             self.current_fcs_adata = adata
+            # Sauvegarder une copie brute pour le toggle
+            import copy as _copy
+            self._fcs_adata_raw = _copy.copy(adata)
+            self._fcs_adata_raw.X = adata.X.copy()
+            # Réinitialiser le mode sur "Brut" à chaque nouveau chargement
+            self._fcs_viewer_mode = "raw"
+            if hasattr(self, "btn_fcs_raw"):
+                self.btn_fcs_raw.setStyleSheet(self._fcs_mode_style_active)
+                self.btn_fcs_logicle.setStyleSheet(self._fcs_mode_style_inactive)
+                if hasattr(self, "btn_fcs_log"):
+                    self.btn_fcs_log.setStyleSheet(self._fcs_mode_style_inactive)
+
             markers = list(adata.var_names)
 
             for combo in (self.combo_fcs_x, self.combo_fcs_y):
@@ -6094,6 +6319,81 @@ class FlowSomAnalyzerPro(QMainWindow):
             self.btn_load_fcs_viz.setEnabled(True)
         QMessageBox.critical(self, "Erreur chargement FCS", msg)
         self._log(f"Erreur chargement FCS : {msg}")
+
+    def _apply_logicle_to_adata(self, adata_raw: Any) -> Any:
+        """Retourne un adata avec la transformation logicle appliquée à la volée sur tous les canaux."""
+        import copy as _copy
+        import numpy as np
+        try:
+            from flowsom_pipeline_pro.src.core.transformers import DataTransformer
+        except Exception:
+            return adata_raw
+
+        X_raw = adata_raw.X
+        if hasattr(X_raw, "toarray"):
+            X_raw = X_raw.toarray()
+        X_raw = np.array(X_raw, dtype=np.float64)
+        var_names = list(adata_raw.var_names)
+        # apply_to_scatter=True → tous les canaux sans exclusion FSC/SSC/Time
+        X_out = DataTransformer.apply(
+            X_raw, method="logicle", var_names=var_names, apply_to_scatter=True
+        )
+        adata_out = _copy.copy(adata_raw)
+        adata_out.X = X_out.astype(np.float32)
+        return adata_out
+
+    def _apply_log10_to_adata(self, adata_raw: Any) -> Any:
+        """Retourne un adata avec log10(x+1) appliqué à la volée sur tous les canaux."""
+        import copy as _copy
+        import numpy as np
+
+        X_raw = adata_raw.X
+        if hasattr(X_raw, "toarray"):
+            X_raw = X_raw.toarray()
+        X_out = np.log10(np.array(X_raw, dtype=np.float64) + 1.0)
+        adata_out = _copy.copy(adata_raw)
+        adata_out.X = X_out.astype(np.float32)
+        return adata_out
+
+    def _set_fcs_viewer_mode(self, mode: str) -> None:
+        """Bascule le viewer FCS : 'raw' | 'logicle' | 'log'."""
+        if mode == getattr(self, "_fcs_viewer_mode", "raw"):
+            return
+        self._fcs_viewer_mode = mode
+
+        _a = self._fcs_mode_style_active
+        _i = self._fcs_mode_style_inactive
+        self.btn_fcs_raw.setStyleSheet(_a if mode == "raw" else _i)
+        self.btn_fcs_logicle.setStyleSheet(_a if mode == "logicle" else _i)
+        if hasattr(self, "btn_fcs_log"):
+            self.btn_fcs_log.setStyleSheet(_a if mode == "log" else _i)
+
+        if self._fcs_adata_raw is None:
+            return
+
+        if mode == "logicle":
+            self.current_fcs_adata = self._apply_logicle_to_adata(self._fcs_adata_raw)
+        elif mode == "log":
+            self.current_fcs_adata = self._apply_log10_to_adata(self._fcs_adata_raw)
+        else:
+            import copy as _copy
+            self.current_fcs_adata = _copy.copy(self._fcs_adata_raw)
+            self.current_fcs_adata.X = self._fcs_adata_raw.X.copy()
+
+        self._update_fcs_plot()
+
+    def _set_clusters_viewer_mode(self, mode: str) -> None:
+        """Bascule le scatter de l'onglet Clusters : 'raw' | 'logicle'."""
+        if mode == getattr(self, "_clusters_viewer_mode", "raw"):
+            return
+        self._clusters_viewer_mode = mode
+
+        _a = self._clusters_mode_style_active
+        _i = self._clusters_mode_style_inactive
+        self.btn_clusters_raw.setStyleSheet(_a if mode == "raw" else _i)
+        self.btn_clusters_logicle.setStyleSheet(_a if mode == "logicle" else _i)
+
+        self._update_focus_plot()
 
     def _update_fcs_plot(self) -> None:
         if self.current_fcs_adata is None:
@@ -6726,7 +7026,7 @@ def main() -> None:
     if _ico.exists():
         app.setWindowIcon(QIcon(str(_ico)))
     window = FlowSomAnalyzerPro()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec_())
 
 

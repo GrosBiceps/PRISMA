@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green.svg)](https://pypi.org/project/PyQt5/)
 [![ELN 2022](https://img.shields.io/badge/Standard-ELN%202022-critical)](https://www.hematology.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Licence: Propriétaire](https://img.shields.io/badge/Licence-Propri%C3%A9taire-red.svg)](LICENCE.md)
 
 > **Dispositif Médical Logiciel (SaMD) de Grade Clinique**  
 > Détection de la Maladie Résiduelle Minimale (MRD) dans les Leucémies Aiguës Myéloïdes (LAM) par approche *Different from Normal* (DfN — EuroFlow/ELN 2022) avec supervision humaine.
@@ -711,11 +711,23 @@ Rapport PDF basique                →     Rapport "MRD Validée Expert"
 
 ---
 
-## Auteurs & Contexte
+## Auteur & Contexte
 
-Développé dans le cadre d'une initiative de recherche en hématologie clinique, ce projet illustre la convergence entre les méthodes de bioinformatique computationnelle (clustering non supervisé, optimisation bayésienne) et les standards cliniques de pointe (ELN 2022, EuroFlow).
+**PRISMA** a été conçu et développé par **Florian Magne** dans le cadre d'une initiative de recherche en hématologie clinique, illustrant la convergence entre les méthodes de bioinformatique computationnelle (clustering non supervisé, optimisation bayésienne) et les standards cliniques de pointe (ELN 2022, EuroFlow).
 
 **Stack** : Python · PyQt5 · FlowSOM · Optuna · Harmony · Plotly · Pandas · Scikit-learn
+
+---
+
+## Licence
+
+© 2025 Florian Magne. **Tous droits réservés.**
+
+Ce logiciel est distribué sous licence propriétaire. Toute utilisation, copie, modification ou distribution est **interdite sans autorisation écrite préalable** de l'auteur.
+
+Voir le fichier [LICENCE.md](LICENCE.md) pour les conditions complètes.
+
+Contact : florian.magne40@gmail.com
 
 ---
 

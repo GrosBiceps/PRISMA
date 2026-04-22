@@ -594,12 +594,12 @@ class SpiderPlotWorker(QThread):
             ax.set_ylim(0, 1)
             ax.set_yticks([0.25, 0.5, 0.75, 1.0])
             ax.set_yticklabels(["0.25", "0.5", "0.75", "1.0"], size=6, color="#6c7086")
-            ax.set_title(
+            fig.suptitle(
                 self._cluster_label,
                 color="#cdd6f4",
                 fontsize=title_font,
                 fontweight="bold",
-                pad=title_pad,
+                y=0.98,
             )
 
             # Légende toujours affichée, avec description explicite des séries
@@ -666,7 +666,8 @@ class SpiderPlotWorker(QThread):
                 legend_col = min(0.28, max(0.19, 170.0 / float(self._canvas_width)))
                 ax_left = legend_col + 0.02
                 ax_right = 0.90
-                ax.set_position([ax_left, 0.12, max(0.46, ax_right - ax_left), 0.76])
+                # top réduit à 0.88 pour laisser 10 % au suptitle
+                ax.set_position([ax_left, 0.10, max(0.46, ax_right - ax_left), 0.72])
                 lg_font = 6.8
                 lg_anchor = (0.02, 0.50)
                 lg_loc = "center left"
@@ -676,7 +677,8 @@ class SpiderPlotWorker(QThread):
                 legend_col = min(0.32, max(0.22, 210.0 / float(self._canvas_width)))
                 ax_left = legend_col + 0.02
                 ax_right = 0.92
-                ax.set_position([ax_left, 0.10, max(0.48, ax_right - ax_left), 0.80])
+                # top réduit à 0.88 pour laisser 10 % au suptitle
+                ax.set_position([ax_left, 0.08, max(0.48, ax_right - ax_left), 0.76])
                 lg_font = 7.4
                 lg_anchor = (0.02, 0.50)
                 lg_loc = "center left"
